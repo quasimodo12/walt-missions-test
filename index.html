@@ -68,6 +68,47 @@
       <h3>Standard candidates by target group</h3>
       <ul id="by-target-group"></ul>
     </section>
+    <section id="inspection" aria-labelledby="inspection-heading" hidden>
+      <h2 id="inspection-heading">Candidate inspection</h2>
+      <p>Inspecting or exporting candidates does not schedule or approve them. Apply changed filters with “Calculate counts” first.</p>
+      <p>CSV exports the current candidate type and search across all pages. JSON exports both enabled types with the current search; its summary reflects the applied scenario filters before search. Hybrid distance sorting uses the longer shooter-to-target distance.</p>
+      <div class="filter-grid">
+        <label>Candidate type
+          <select id="candidate-kind"><option value="standard">Standard</option><option value="hybrid">Pairwise hybrid</option></select>
+        </label>
+        <label>Search platform or weapon <input id="candidate-search" type="search"></label>
+        <label>Sort by
+          <select id="candidate-sort">
+            <option value="shooter">Shooter</option><option value="target">Target</option>
+            <option value="weapon">Weapon</option><option value="distance">Distance</option>
+            <option value="required">Required quantity</option><option value="group">Shooter group</option>
+            <option value="type">Target type</option>
+          </select>
+        </label>
+      </div>
+      <p><button id="load-candidates" type="button">Load candidate details</button>
+        <button id="export-csv" type="button">Export current view CSV</button>
+        <button id="export-json" type="button">Export filtered results JSON</button></p>
+      <p id="inspection-error" class="invalid" role="alert"></p>
+      <p id="candidate-count" role="status">Candidate details not loaded.</p>
+      <div class="table-scroll">
+        <table>
+          <thead><tr><th>Shooter(s)</th><th>Target</th><th>Weapon</th><th>Distance (m)</th><th>Required</th><th>Allocation</th><th>Details</th></tr></thead>
+          <tbody id="candidate-rows"></tbody>
+        </table>
+      </div>
+      <p><button id="previous-page" type="button">Previous</button> <span id="candidate-page"></span> <button id="next-page" type="button">Next</button></p>
+      <h3>Candidate explanation</h3>
+      <div id="candidate-explanation">Select a candidate to inspect it.</div>
+      <h3>Why excluded? (standard engagement)</h3>
+      <div class="filter-grid">
+        <label>Shooter <select id="diagnostic-shooter"></select></label>
+        <label>Target <select id="diagnostic-target"></select></label>
+        <label>Weapon <select id="diagnostic-weapon"></select></label>
+      </div>
+      <p><button id="diagnose" type="button">Explain pair</button></p>
+      <div id="diagnostic-result" role="status"></div>
+    </section>
     <noscript>JavaScript must be enabled to validate the scenario data.</noscript>
   </main>
 </body>

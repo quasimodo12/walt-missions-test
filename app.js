@@ -244,7 +244,22 @@ const MissionData = (() => {
     };
   }
 
-  function summarizeEngagements(data, indexes, filters) {
+  function matchesPlatform(platform, prefix, filters) {
+    const selected = (list, value) => !list.length || list.includes(value);
+    return platform.side === filters[`${prefix}Side`] &&
+      selected(filters[`${prefix}PlatformNames`], platform.platform_name) &&
+      selected(filters[`${prefix}Groups`], platform.group) &&
+      (!filters[`${prefix}Subgroups`].length ||
+        platform.subgroups.some(group => filters[`${prefix}Subgroups`].includes(group))) &&
+      selected(filters[`${prefix}Types`], platform.type) &&
+      selected(filters.categories, platform.category);
+  }
+
+  function candidateId(kind, ...parts) {
+    return [kind, ...parts.map(part => encodeURIComponent(String(part)))].join("::");
+  }
+
+  function summarizeEngagements(data, indexes, filters, collect = null) {
     if (SCENARIO_RULES.requireOpposingSides && filters.shooterSide === filters.targetSide) {
       throw new Error("Shooter and target sides must be different.");
     }
@@ -256,18 +271,8 @@ const MissionData = (() => {
       throw new Error("Maximum distance must be a non-negative number of meters.");
     }
 
-    function matches(platform, prefix) {
-      const selected = (list, value) => !list.length || list.includes(value);
-      return selected(filters[`${prefix}PlatformNames`], platform.platform_name) &&
-        selected(filters[`${prefix}Groups`], platform.group) &&
-        (!filters[`${prefix}Subgroups`].length ||
-          platform.subgroups.some(group => filters[`${prefix}Subgroups`].includes(group))) &&
-        selected(filters[`${prefix}Types`], platform.type) &&
-        selected(filters.categories, platform.category);
-    }
-
-    const shooters = (indexes.platformsBySide.get(filters.shooterSide) || []).filter(p => matches(p, "shooter"));
-    const targets = (indexes.platformsBySide.get(filters.targetSide) || []).filter(p => matches(p, "target"));
+    const shooters = (indexes.platformsBySide.get(filters.shooterSide) || []).filter(p => matchesPlatform(p, "shooter", filters));
+    const targets = (indexes.platformsBySide.get(filters.targetSide) || []).filter(p => matchesPlatform(p, "target", filters));
     const summary = {
       shooterCount: shooters.length, targetCount: targets.length,
       pairCount: 0, distanceQualifiedPairs: 0, lethalityMatches: 0, rangeQualified: 0,
@@ -306,15 +311,28 @@ const MissionData = (() => {
             increment(summary.byTargetType, target.type);
             increment(summary.byShooterGroup, shooter.group);
             increment(summary.byTargetGroup, target.group);
+            if (collect?.standard) {
+              collect.standard({
+                id: candidateId("std", shooter.platform_name, target.platform_name, item.name),
+                kind: "standard", shooterPlatform: shooter.platform_name,
+                shooterSide: shooter.side, shooterGroup: shooter.group,
+                targetPlatform: target.platform_name, targetSide: target.side,
+                targetType: target.type, weapon: item.name, distanceMeters: distance,
+                weaponMinRangeMeters: weapon.weapon_min_range, weaponMaxRangeMeters: weapon.weapon_max_range,
+                shooterLoadedQuantity: item.quantity, shooterReserveQuantity: filters.minimumReserveByWeapon,
+                shooterAvailableQuantity: available, requiredQuantity: lethality.quantity
+              });
+            }
           }
           if (filters.includeHybridEngagements && available > 0) {
             if (!hybridByWeapon.has(item.name)) hybridByWeapon.set(item.name, []);
-            hybridByWeapon.get(item.name).push({ available, required: lethality.quantity });
+            hybridByWeapon.get(item.name).push({ shooter, item, weapon, distance, available, required: lethality.quantity });
           }
         }
       }
       if (filters.includeHybridEngagements) {
         for (const contributors of hybridByWeapon.values()) {
+          if (collect?.hybrid) contributors.sort((a, b) => a.shooter.platform_name < b.shooter.platform_name ? -1 : a.shooter.platform_name > b.shooter.platform_name ? 1 : 0);
           for (let a = 0; a < contributors.length; a++) {
             for (let b = a + 1; b < contributors.length; b++) {
               const required = contributors[a].required;
@@ -323,6 +341,27 @@ const MissionData = (() => {
               summary.hybridPatterns += Math.max(0, upper - lower + 1);
               if (!Number.isSafeInteger(summary.hybridPatterns)) {
                 throw new Error("Hybrid allocation count exceeds the safe integer limit.");
+              }
+              if (collect?.hybrid) {
+                const first = contributors[a], second = contributors[b];
+                for (let allocation = lower; allocation <= upper; allocation++) {
+                  const other = required - allocation;
+                  collect.hybrid({
+                    id: candidateId("hyb", first.shooter.platform_name, second.shooter.platform_name, target.platform_name, first.item.name, allocation, other),
+                    kind: "hybrid", shooterAPlatform: first.shooter.platform_name,
+                    shooterBPlatform: second.shooter.platform_name,
+                    shooterAGroup: first.shooter.group, shooterBGroup: second.shooter.group,
+                    targetPlatform: target.platform_name,
+                    targetType: target.type, weapon: first.item.name,
+                    distanceShooterAToTargetMeters: first.distance, distanceShooterBToTargetMeters: second.distance,
+                    weaponMinRangeMeters: first.weapon.weapon_min_range, weaponMaxRangeMeters: first.weapon.weapon_max_range,
+                    shooterAAllocatedQuantity: allocation, shooterBAllocatedQuantity: other,
+                    shooterALoadedQuantity: first.item.quantity, shooterBLoadedQuantity: second.item.quantity,
+                    shooterAReserveQuantity: filters.minimumReserveByWeapon, shooterBReserveQuantity: filters.minimumReserveByWeapon,
+                    shooterAAvailableQuantity: first.available, shooterBAvailableQuantity: second.available,
+                    requiredQuantity: required
+                  });
+                }
               }
             }
           }
@@ -333,7 +372,89 @@ const MissionData = (() => {
     return summary;
   }
 
-  return { validateAndNormalize, distanceMeters, defaultFilters, summarizeEngagements };
+  function generateCandidates(data, indexes, filters, kind) {
+    if (kind !== "standard" && kind !== "hybrid") throw new Error("Unknown candidate kind.");
+    const candidates = [];
+    summarizeEngagements(data, indexes, filters, { [kind]: candidate => candidates.push(candidate) });
+    return candidates;
+  }
+
+  function diagnosePair(indexes, filters, shooterName, targetName, weaponName) {
+    const shooter = indexes.platformByName.get(shooterName);
+    const target = indexes.platformByName.get(targetName);
+    if (!shooter || !target) throw new Error("Select an existing shooter and target.");
+    const failures = [];
+    if (!matchesPlatform(shooter, "shooter", filters)) failures.push("Shooter excluded by the active filters.");
+    if (!matchesPlatform(target, "target", filters)) failures.push("Target excluded by the active filters.");
+    if (shooterName === targetName) failures.push("Shooter and target must be different platforms.");
+    if (filters.weaponNames.length && !filters.weaponNames.includes(weaponName)) failures.push("Weapon excluded by the active filters.");
+    const distance = distanceMeters(shooter, target);
+    if (filters.maxDistanceMeters !== null && distance > filters.maxDistanceMeters) failures.push("Pair exceeds the maximum distance filter.");
+    const inventory = shooter.weapons.find(item => item.name === weaponName);
+    if (!inventory) failures.push("Shooter does not carry this weapon.");
+    const weapon = indexes.weaponByName.get(weaponName);
+    if (!weapon) failures.push("Weapon is missing from weapon definitions.");
+    const lethality = indexes.lethalityByWeaponAndTargetType.get(weaponName)?.get(target.type);
+    if (!lethality) failures.push("No lethality record for this weapon and target type.");
+    if (weapon && distance < weapon.weapon_min_range) failures.push("Target is below minimum weapon range.");
+    if (weapon && distance > weapon.weapon_max_range) failures.push("Target is beyond maximum weapon range.");
+    if (inventory && lethality) {
+      if (inventory.quantity < lethality.quantity) failures.push("Insufficient loaded weapon quantity.");
+      else if (Math.max(0, inventory.quantity - filters.minimumReserveByWeapon) < lethality.quantity) failures.push("Reserve rule prevents qualification.");
+    }
+    return { distanceMeters: distance, failures };
+  }
+
+  function filterAndSortCandidates(candidates, search, sort) {
+    const needle = search.trim().toLocaleLowerCase();
+    const fields = {
+      shooter: c => c.shooterPlatform || `${c.shooterAPlatform} ${c.shooterBPlatform}`,
+      target: c => c.targetPlatform, weapon: c => c.weapon,
+      distance: c => c.kind === "standard" ? c.distanceMeters : Math.max(c.distanceShooterAToTargetMeters, c.distanceShooterBToTargetMeters),
+      required: c => c.requiredQuantity,
+      group: c => c.kind === "standard" ? c.shooterGroup : `${c.shooterAGroup} ${c.shooterBGroup}`,
+      type: c => c.targetType
+    };
+    if (!fields[sort]) throw new Error("Unknown sort field.");
+    return candidates.filter(c => !needle || [c.shooterPlatform, c.shooterAPlatform, c.shooterBPlatform, c.targetPlatform, c.weapon]
+      .some(value => value && value.toLocaleLowerCase().includes(needle)))
+      .slice().sort((a, b) => {
+        const x = fields[sort](a), y = fields[sort](b);
+        const comparison = typeof x === "number" ? x - y : String(x).localeCompare(String(y));
+        return comparison || a.id.localeCompare(b.id);
+      });
+  }
+
+  function candidatesCsv(candidates, kind) {
+    const fields = candidates.length ? Object.keys(candidates[0]) :
+      kind === "standard" ? [
+        "id", "kind", "shooterPlatform", "shooterSide", "shooterGroup", "targetPlatform", "targetSide",
+        "targetType", "weapon", "distanceMeters", "weaponMinRangeMeters", "weaponMaxRangeMeters",
+        "shooterLoadedQuantity", "shooterReserveQuantity", "shooterAvailableQuantity", "requiredQuantity"
+      ] : [
+        "id", "kind", "shooterAPlatform", "shooterBPlatform", "shooterAGroup", "shooterBGroup",
+        "targetPlatform", "targetType", "weapon", "distanceShooterAToTargetMeters", "distanceShooterBToTargetMeters",
+        "weaponMinRangeMeters", "weaponMaxRangeMeters", "shooterAAllocatedQuantity", "shooterBAllocatedQuantity",
+        "shooterALoadedQuantity", "shooterBLoadedQuantity", "shooterAReserveQuantity", "shooterBReserveQuantity",
+        "shooterAAvailableQuantity", "shooterBAvailableQuantity", "requiredQuantity"
+      ];
+    const quote = value => {
+      let text = String(value ?? "");
+      if (typeof value === "string" && /^[\s]*[=+\-@\t\r]/.test(text)) text = `'${text}`;
+      return `"${text.replace(/"/g, '""')}"`;
+    };
+    return [fields.map(quote).join(","), ...candidates.map(c => fields.map(key => quote(c[key])).join(","))].join("\r\n");
+  }
+
+  function exportPackage(filters, summary, candidates, view, timestamp = new Date().toISOString()) {
+    return {
+      filters, scenarioRules: SCENARIO_RULES,
+      summary: Object.fromEntries(Object.entries(summary).map(([key, value]) => [key, value instanceof Map ? Object.fromEntries(value) : value])),
+      generatedAt: timestamp, view, candidates
+    };
+  }
+
+  return { validateAndNormalize, distanceMeters, defaultFilters, summarizeEngagements, generateCandidates, diagnosePair, filterAndSortCandidates, candidatesCsv, exportPackage };
 })();
 
 function renderStatus(input, result) {
@@ -398,6 +519,7 @@ function initializeEngagements(result) {
     return;
   }
   const { data, indexes } = result;
+  const inspection = initializeInspection(data, indexes);
   const defaults = MissionData.defaultFilters();
   const controls = {
     shooterSide: "side", targetSide: "side",
@@ -438,11 +560,154 @@ function initializeEngagements(result) {
     } catch (problem) {
       error.textContent = problem.message;
       document.getElementById("results").hidden = true;
+      document.getElementById("inspection").hidden = true;
       return;
     }
     renderSummary(summary, filters);
+    inspection.setResults(filters, summary);
   });
   form.requestSubmit();
+}
+
+function initializeInspection(data, indexes) {
+  const element = id => document.getElementById(id);
+  const names = new Set(data.platforms.map(platform => platform.platform_name));
+  populateSelect(element("diagnostic-shooter"), names);
+  populateSelect(element("diagnostic-target"), names);
+  populateSelect(element("diagnostic-weapon"), new Set([
+    ...data.weapons.map(weapon => weapon.weapon_name),
+    ...data.platforms.flatMap(platform => platform.weapons.map(weapon => weapon.name))
+  ]));
+  const state = { filters: null, summary: null, cache: {}, page: 0 };
+  const pageSize = 25;
+
+  function candidates(kind) {
+    if (!state.cache[kind]) state.cache[kind] = MissionData.generateCandidates(data, indexes, state.filters, kind);
+    return state.cache[kind];
+  }
+  function currentView(kind) {
+    return MissionData.filterAndSortCandidates(candidates(kind), element("candidate-search").value, element("candidate-sort").value);
+  }
+  function showError(error) {
+    element("inspection-error").textContent = error.message;
+  }
+  function render() {
+    const kind = element("candidate-kind").value;
+    const rows = element("candidate-rows");
+    rows.replaceChildren();
+    element("candidate-explanation").textContent = "Select a candidate to inspect it.";
+    if (!state.cache[kind]) {
+      element("candidate-count").textContent = "Candidate details not loaded.";
+      element("candidate-page").textContent = "";
+      element("previous-page").disabled = true;
+      element("next-page").disabled = true;
+      return;
+    }
+    const view = currentView(kind);
+    const pages = Math.max(1, Math.ceil(view.length / pageSize));
+    state.page = Math.min(state.page, pages - 1);
+    element("candidate-count").textContent = `${view.length} matching ${kind} records.`;
+    element("candidate-page").textContent = `Page ${state.page + 1} of ${pages}`;
+    element("previous-page").disabled = state.page === 0;
+    element("next-page").disabled = state.page >= pages - 1;
+    for (const candidate of view.slice(state.page * pageSize, (state.page + 1) * pageSize)) {
+      const row = document.createElement("tr");
+      const shooter = candidate.kind === "standard" ? candidate.shooterPlatform : `${candidate.shooterAPlatform} + ${candidate.shooterBPlatform}`;
+      const distance = candidate.kind === "standard" ? candidate.distanceMeters.toFixed(1) :
+        `${candidate.distanceShooterAToTargetMeters.toFixed(1)} / ${candidate.distanceShooterBToTargetMeters.toFixed(1)}`;
+      const allocation = candidate.kind === "standard" ? String(candidate.requiredQuantity) :
+        `${candidate.shooterAAllocatedQuantity} + ${candidate.shooterBAllocatedQuantity}`;
+      for (const value of [shooter, candidate.targetPlatform, candidate.weapon, distance, candidate.requiredQuantity, allocation]) {
+        const cell = document.createElement("td");
+        cell.textContent = String(value);
+        row.append(cell);
+      }
+      const cell = document.createElement("td");
+      const button = document.createElement("button");
+      button.type = "button";
+      button.textContent = "Explain";
+      button.addEventListener("click", () => explain(candidate));
+      cell.append(button);
+      row.append(cell);
+      rows.append(row);
+    }
+  }
+  function explain(candidate) {
+    const describe = name => {
+      const p = indexes.platformByName.get(name);
+      return `${p.platform_name}: type ${p.type}, side ${p.side}, group ${p.group}, subgroups ${p.subgroups.join(", ") || "none"}`;
+    };
+    const target = describe(candidate.targetPlatform);
+    const range = `Weapon ${candidate.weapon}; configured range ${candidate.weaponMinRangeMeters}–${candidate.weaponMaxRangeMeters} m; required quantity ${candidate.requiredQuantity}.`;
+    let text;
+    if (candidate.kind === "standard") {
+      text = `${describe(candidate.shooterPlatform)}\nTarget ${target}\n${range}\nDistance ${candidate.distanceMeters.toFixed(1)} m; loaded ${candidate.shooterLoadedQuantity}; reserve ${candidate.shooterReserveQuantity}; available ${candidate.shooterAvailableQuantity}.\nQualifies because the target is within configured range and available inventory meets the required quantity.`;
+    } else {
+      text = `${describe(candidate.shooterAPlatform)}\n${describe(candidate.shooterBPlatform)}\nTarget ${target}\n${range}\nShooter A: distance ${candidate.distanceShooterAToTargetMeters.toFixed(1)} m, loaded ${candidate.shooterALoadedQuantity}, reserve ${candidate.shooterAReserveQuantity}, available ${candidate.shooterAAvailableQuantity}, contributes ${candidate.shooterAAllocatedQuantity}.\nShooter B: distance ${candidate.distanceShooterBToTargetMeters.toFixed(1)} m, loaded ${candidate.shooterBLoadedQuantity}, reserve ${candidate.shooterBReserveQuantity}, available ${candidate.shooterBAvailableQuantity}, contributes ${candidate.shooterBAllocatedQuantity}.\nQualifies because both shooters are within range and contribute ${candidate.shooterAAllocatedQuantity + candidate.shooterBAllocatedQuantity} rounds in total, exactly the required quantity.`;
+    }
+    element("candidate-explanation").textContent = text;
+  }
+  function download(name, content, type) {
+    const url = URL.createObjectURL(new Blob([content], { type }));
+    const link = document.createElement("a");
+    link.href = url;
+    link.download = name;
+    link.click();
+    setTimeout(() => URL.revokeObjectURL(url), 0);
+  }
+  function action(callback) {
+    try {
+      element("inspection-error").textContent = "";
+      callback();
+    } catch (error) {
+      showError(error);
+    }
+  }
+  element("load-candidates").addEventListener("click", () => action(() => {
+    candidates(element("candidate-kind").value);
+    state.page = 0;
+    render();
+  }));
+  for (const id of ["candidate-kind", "candidate-sort", "candidate-search"]) {
+    element(id).addEventListener(id === "candidate-search" ? "input" : "change", () => {
+      state.page = 0;
+      render();
+    });
+  }
+  element("previous-page").addEventListener("click", () => { state.page--; render(); });
+  element("next-page").addEventListener("click", () => { state.page++; render(); });
+  element("export-csv").addEventListener("click", () => action(() => {
+    const kind = element("candidate-kind").value;
+    download(`${kind}-candidates.csv`, MissionData.candidatesCsv(currentView(kind), kind), "text/csv;charset=utf-8");
+    render();
+  }));
+  element("export-json").addEventListener("click", () => action(() => {
+    const view = { search: element("candidate-search").value, sort: element("candidate-sort").value };
+    const packageData = MissionData.exportPackage(state.filters, state.summary, {
+      standard: currentView("standard"), hybrid: currentView("hybrid")
+    }, view);
+    download("filtered-engagements.json", JSON.stringify(packageData, null, 2), "application/json");
+    render();
+  }));
+  element("diagnose").addEventListener("click", () => action(() => {
+    const diagnostic = MissionData.diagnosePair(indexes, state.filters,
+      element("diagnostic-shooter").value, element("diagnostic-target").value, element("diagnostic-weapon").value);
+    element("diagnostic-result").textContent = `Distance: ${diagnostic.distanceMeters.toFixed(1)} m. ` +
+      (diagnostic.failures.length ? `First failure: ${diagnostic.failures[0]} All failures: ${diagnostic.failures.join(" ")}` :
+        "Qualifies as a standard candidate, provided standard engagements are included.");
+  }));
+  return {
+    setResults(filters, summary) {
+      state.filters = filters;
+      state.summary = summary;
+      state.cache = {};
+      state.page = 0;
+      element("inspection").hidden = false;
+      element("inspection-error").textContent = "";
+      element("diagnostic-result").textContent = "";
+      render();
+    }
+  };
 }
 
 function populateSelect(select, values, selected) {

@@ -5,7 +5,8 @@ const test = require("node:test");
 const assert = require("node:assert/strict");
 const fs = require("node:fs");
 const vm = require("node:vm");
-const { validateAndNormalize, distanceMeters, defaultFilters, summarizeEngagements } = require("./app.js");
+const { validateAndNormalize, distanceMeters, defaultFilters, summarizeEngagements, generateCandidates,
+  diagnosePair, filterAndSortCandidates, candidatesCsv, exportPackage } = require("./app.js");
 
 function fixture() {
   return {
@@ -146,6 +147,81 @@ test("supplied data meets phase 1 regression counts", () => {
   for (const map of [summary.byWeapon, summary.byTargetType, summary.byShooterGroup, summary.byTargetGroup]) {
     assert.equal([...map.values()].reduce((sum, value) => sum + value, 0), 260);
   }
+  const standard = generateCandidates(result.data, result.indexes, defaultFilters(), "standard");
+  const hybrid = generateCandidates(result.data, result.indexes, defaultFilters(), "hybrid");
+  assert.equal(standard.length, 260);
+  assert.equal(hybrid.length, 2287);
+  assert.equal(new Set(standard.map(c => c.id)).size, 260);
+  assert.equal(new Set(hybrid.map(c => c.id)).size, 2287);
+  assert.ok(hybrid.every(c => c.shooterAPlatform < c.shooterBPlatform &&
+    c.shooterAAllocatedQuantity > 0 && c.shooterBAllocatedQuantity > 0 &&
+    c.shooterAAllocatedQuantity + c.shooterBAllocatedQuantity === c.requiredQuantity));
+});
+
+test("candidate details reconcile with filtered counts and IDs survive shooter reordering", () => {
+  const result = engagementFixture();
+  result.data.platforms[0].weapons[0].quantity = 4;
+  const filters = defaultFilters();
+  filters.minimumReserveByWeapon = 1;
+  const summary = summarizeEngagements(result.data, result.indexes, filters);
+  const standard = generateCandidates(result.data, result.indexes, filters, "standard");
+  const hybrids = generateCandidates(result.data, result.indexes, filters, "hybrid");
+  assert.equal(standard.length, summary.standardCandidates);
+  assert.equal(hybrids.length, summary.hybridPatterns);
+  assert.deepEqual([standard[0].shooterLoadedQuantity, standard[0].shooterReserveQuantity, standard[0].shooterAvailableQuantity], [4, 1, 3]);
+  assert.equal(hybrids.length, 1);
+  assert.deepEqual([hybrids[0].shooterAPlatform, hybrids[0].shooterBPlatform,
+    hybrids[0].shooterAAllocatedQuantity, hybrids[0].shooterBAllocatedQuantity], ["ship", "ship2", 2, 1]);
+  result.indexes.platformsBySide.get("blue").reverse();
+  assert.deepEqual(generateCandidates(result.data, result.indexes, filters, "hybrid").map(c => c.id), hybrids.map(c => c.id));
+  filters.weaponNames = ["no-such-weapon"];
+  assert.equal(generateCandidates(result.data, result.indexes, filters, "standard").length, 0);
+  assert.equal(generateCandidates(result.data, result.indexes, filters, "hybrid").length, 0);
+});
+
+test("pair diagnostics report filter, missing data, range, inventory and reserve failures", () => {
+  const result = engagementFixture();
+  const filters = defaultFilters();
+  assert.match(diagnosePair(result.indexes, filters, "ship", "target", "missile").failures.join(" "), /Insufficient/);
+  filters.minimumReserveByWeapon = 2;
+  result.data.platforms[0].weapons[0].quantity = 3;
+  assert.match(diagnosePair(result.indexes, filters, "ship", "target", "missile").failures.join(" "), /Reserve/);
+  filters.shooterGroups = ["other"];
+  filters.targetTypes = ["other"];
+  result.data.weapons[0].weapon_min_range = 1;
+  const failures = diagnosePair(result.indexes, filters, "ship", "target", "missile").failures.join(" ");
+  assert.match(failures, /Shooter excluded/);
+  assert.match(failures, /Target excluded/);
+  assert.match(failures, /below minimum/);
+  result.data.weapons[0].weapon_min_range = 0;
+  result.data.weapons[0].weapon_max_range = 0;
+  result.data.platforms[2].longitude = 1;
+  assert.match(diagnosePair(result.indexes, filters, "ship", "target", "missile").failures.join(" "), /beyond maximum/);
+  const missing = diagnosePair(result.indexes, filters, "ship", "target", "missing").failures.join(" ");
+  assert.match(missing, /does not carry/);
+  assert.match(missing, /missing from weapon definitions/);
+  assert.match(missing, /No lethality/);
+});
+
+test("search, sorting, CSV escaping and JSON export preserve filtered records and metadata", () => {
+  const result = engagementFixture();
+  result.data.platforms[0].weapons[0].quantity = 3;
+  const filters = defaultFilters();
+  const summary = summarizeEngagements(result.data, result.indexes, filters);
+  const records = generateCandidates(result.data, result.indexes, filters, "standard");
+  assert.equal(filterAndSortCandidates(records, "SHIP", "target").length, 1);
+  assert.equal(filterAndSortCandidates(records, "absent", "weapon").length, 0);
+  const csv = candidatesCsv([{ id: 'a,"b', weapon: "=formula", quantity: -1 }]);
+  assert.match(csv, /"a,""b"/);
+  assert.match(csv, /"'=formula"/);
+  assert.match(csv, /"-1"/);
+  assert.match(candidatesCsv([], "standard"), /"shooterPlatform"/);
+  const exported = JSON.parse(JSON.stringify(exportPackage(filters, summary, { standard: records, hybrid: [] }, { search: "", sort: "weapon" }, "2026-01-01T00:00:00.000Z")));
+  assert.equal(exported.generatedAt, "2026-01-01T00:00:00.000Z");
+  assert.equal(exported.scenarioRules.rangeUnit, "meters");
+  assert.equal(exported.summary.standardCandidates, 1);
+  assert.equal(exported.summary.byWeapon.missile, 1);
+  assert.equal(exported.candidates.standard[0].id, records[0].id);
 });
 
 test("hybrids count positive exact allocations from distinct shooters and respect reserve", () => {
@@ -242,7 +318,7 @@ test("rejects invalid filter values and same-side selection", () => {
   assert.throws(() => summarizeEngagements(result.data, result.indexes, filters), /distance/);
 });
 
-test("offline page loads fixed scripts in order and displays supplied data and missing inputs", () => {
+test("offline page loads fixed scripts, inspects, exports and handles missing inputs", async () => {
   const html = fs.readFileSync("index.html", "utf8");
   const scripts = [...html.matchAll(/<script defer src="\.\/([^"]+)"><\/script>/g)].map(match => match[1]);
   assert.deepEqual(scripts, ["platform_details.js", "weapon_details.js", "weapon_lethality_details.js", "app.js"]);
@@ -250,6 +326,16 @@ test("offline page loads fixed scripts in order and displays supplied data and m
 
   function runPage(sourceFiles) {
     const elements = new Map();
+    const downloads = [];
+    function element() {
+      return {
+        children: [], events: {},
+        append(...children) { this.children.push(...children); },
+        replaceChildren() { this.children = []; },
+        addEventListener(name, callback) { this.events[name] = callback; },
+        click() { this.events.click?.(); }
+      };
+    }
     const formControls = {};
     for (const name of ["shooterSide", "targetSide", "shooterPlatformNames", "targetPlatformNames",
       "shooterGroups", "targetGroups", "shooterSubgroups", "targetSubgroups", "shooterTypes",
@@ -274,23 +360,70 @@ test("offline page loads fixed scripts in order and displays supplied data and m
     const document = {
       getElementById(id) {
         if (id === "filters") return form;
-        if (!elements.has(id)) elements.set(id, {
-          children: [], append(...children) { this.children.push(...children); },
-          replaceChildren() { this.children = []; }
-        });
+        if (!elements.has(id)) {
+          const item = element();
+          if (id === "candidate-kind") item.value = "standard";
+          if (id === "candidate-sort") item.value = "shooter";
+          if (id === "candidate-search") item.value = "";
+          elements.set(id, item);
+        }
         return elements.get(id);
       },
-      createElement() { return {}; }
+      createElement(tag) {
+        const item = element();
+        if (tag === "a") item.click = () => downloads.push({ name: item.download, blob: blobs.get(item.href) });
+        return item;
+      }
     };
-    const context = vm.createContext({ document });
+    const blobs = new Map();
+    const context = vm.createContext({
+      document, Blob,
+      URL: { createObjectURL(blob) { const url = `blob:${blobs.size}`; blobs.set(url, blob); return url; }, revokeObjectURL() {} },
+      setTimeout(callback) { callback(); }
+    });
     context.window = context;
     for (const file of sourceFiles) vm.runInContext(fs.readFileSync(file, "utf8"), context, { filename: file });
-    return { elements, form };
+    return { elements, form, downloads };
   }
   const loaded = runPage(scripts);
   assert.equal(loaded.elements.get("validation-status").textContent, "Data validated successfully.");
   assert.ok(loaded.elements.get("warnings").children.some(item => item.textContent.includes("no lethality")));
   assert.ok(loaded.elements.get("summary-counts").children.some(item => item.textContent === "2287"));
+  assert.equal(loaded.elements.get("candidate-rows").children.length, 0);
+  loaded.elements.get("load-candidates").click();
+  assert.equal(loaded.elements.get("candidate-rows").children.length, 25);
+  assert.match(loaded.elements.get("candidate-count").textContent, /260 matching/);
+  loaded.elements.get("next-page").click();
+  assert.equal(loaded.elements.get("candidate-page").textContent, "Page 2 of 11");
+  loaded.elements.get("candidate-rows").children[0].children[6].children[0].click();
+  assert.match(loaded.elements.get("candidate-explanation").textContent, /Qualifies because/);
+  loaded.elements.get("candidate-kind").value = "hybrid";
+  loaded.elements.get("candidate-kind").events.change();
+  assert.equal(loaded.elements.get("candidate-rows").children.length, 0);
+  loaded.elements.get("load-candidates").click();
+  assert.match(loaded.elements.get("candidate-count").textContent, /2287 matching/);
+  assert.equal(loaded.elements.get("candidate-rows").children.length, 25);
+  loaded.elements.get("export-csv").click();
+  loaded.elements.get("export-json").click();
+  assert.deepEqual(loaded.downloads.map(download => download.name), ["hybrid-candidates.csv", "filtered-engagements.json"]);
+  const csv = await loaded.downloads[0].blob.text();
+  assert.equal(csv.split("\r\n").length, 2288);
+  const exported = JSON.parse(await loaded.downloads[1].blob.text());
+  assert.equal(exported.candidates.standard.length, 260);
+  assert.equal(exported.candidates.hybrid.length, 2287);
+  assert.equal(exported.summary.standardCandidates, 260);
+  loaded.elements.get("candidate-search").value = "not-a-platform-or-weapon";
+  loaded.elements.get("candidate-search").events.input();
+  assert.match(loaded.elements.get("candidate-count").textContent, /0 matching/);
+  loaded.elements.get("export-json").click();
+  const searched = JSON.parse(await loaded.downloads[2].blob.text());
+  assert.deepEqual(searched.candidates, { standard: [], hybrid: [] });
+  assert.equal(searched.summary.standardCandidates, 260);
+  loaded.elements.get("diagnostic-shooter").value = "blue_ship_1";
+  loaded.elements.get("diagnostic-target").value = "red_ship_1";
+  loaded.elements.get("diagnostic-weapon").value = "BLUE_WEAPON_5";
+  loaded.elements.get("diagnose").click();
+  assert.match(loaded.elements.get("diagnostic-result").textContent, /No lethality record/);
   loaded.form.elements.shooterPlatformNames.children.find(option => option.value === "blue_ship_1").selected = true;
   loaded.form.requestSubmit();
   assert.equal(loaded.elements.get("summary-counts").children[1].textContent, "1");

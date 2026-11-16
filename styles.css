@@ -56,6 +56,29 @@ select[multiple] {
   min-height: 5rem;
 }
 
+.table-scroll {
+  overflow-x: auto;
+}
+
+table {
+  border-collapse: collapse;
+  width: 100%;
+}
+
+th, td {
+  border-bottom: 1px solid #d0d5dd;
+  padding: 0.5rem;
+  text-align: left;
+}
+
+button {
+  cursor: pointer;
+}
+
+#candidate-explanation {
+  white-space: pre-line;
+}
+
 li {
   margin: 0.25rem 0;
   overflow-wrap: anywhere;
