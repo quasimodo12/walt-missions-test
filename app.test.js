@@ -6,7 +6,8 @@ const assert = require("node:assert/strict");
 const fs = require("node:fs");
 const vm = require("node:vm");
 const { validateAndNormalize, distanceMeters, defaultFilters, summarizeEngagements, generateCandidates,
-  diagnosePair, filterAndSortCandidates, candidatesCsv, exportPackage } = require("./app.js");
+  diagnosePair, filterAndSortCandidates, candidatesCsv, exportPackage, createMissionPackage,
+  validateMissionPackage, evaluateMission } = require("./app.js");
 
 function fixture() {
   return {
@@ -224,6 +225,86 @@ test("search, sorting, CSV escaping and JSON export preserve filtered records an
   assert.equal(exported.candidates.standard[0].id, records[0].id);
 });
 
+test("mission aggregates standard and hybrid allocations and flags shared inventory and duplicate targets", () => {
+  const input = fixture();
+  input.platforms[0].latitude = 0;
+  input.platforms[0].longitude = 0;
+  input.platforms[0].weapons[0].quantity = 5;
+  input.platforms.push(
+    { ...input.platforms[0], platform_name: "ship2", weapons: [{ name: "missile", quantity: 3 }] },
+    { ...input.platforms[0], platform_name: "target1", side: "red", type: "target-type", weapons: [] },
+    { ...input.platforms[0], platform_name: "target2", side: "red", type: "target-type", weapons: [] }
+  );
+  input.lethality[0].platformType = "target-type";
+  input.lethality[0].quantity = 3;
+  const { data, indexes } = validateAndNormalize(input);
+  const filters = defaultFilters();
+  filters.minimumReserveByWeapon = 1;
+  const standard = generateCandidates(data, indexes, filters, "standard").find(c => c.targetPlatform === "target1");
+  const hybrid = generateCandidates(data, indexes, filters, "hybrid").find(c =>
+    c.targetPlatform === "target2" && c.shooterAAllocatedQuantity === 2);
+  const mission = createMissionPackage(data, filters, [standard, hybrid], false);
+  let result = evaluateMission(data, indexes, mission);
+  assert.deepEqual([result.selectedCount, result.targetCount, result.standardCount, result.hybridCount], [2, 2, 1, 1]);
+  assert.equal(result.expenditures.get("missile"), 6);
+  assert.deepEqual(result.inventory.find(row => row.platform === "ship"), {
+    platform: "ship", weapon: "missile", loaded: 5, reserve: 1, available: 4, planned: 5, remaining: -1, deficit: 1
+  });
+  assert.match(result.conflicts.join(" "), /available = 4; planned = 5; deficit = 1/);
+  assert.equal(result.results[0].status, "conflict");
+  const withoutSecondShooter = validateAndNormalize({
+    ...input, platforms: input.platforms.filter(platform => platform.platform_name !== "ship2")
+  });
+  const missingShooter = evaluateMission(withoutSecondShooter.data, withoutSecondShooter.indexes, mission);
+  assert.equal(missingShooter.results[1].status, "conflict");
+  assert.match(missingShooter.conflicts.join(" "), /ship2: shooter is missing/);
+  assert.equal(missingShooter.results[1].candidate.shooterBAllocatedQuantity, 1);
+  mission.selectedCandidateSnapshots[1] = { ...hybrid, targetPlatform: "target1",
+    id: hybrid.id.replace("target2", "target1") };
+  mission.selectedCandidateIds[1] = mission.selectedCandidateSnapshots[1].id;
+  assert.match(evaluateMission(data, indexes, mission).conflicts.join(" "), /only one is permitted/);
+  mission.permitDuplicateTargets = true;
+  result = evaluateMission(data, indexes, mission);
+  assert.doesNotMatch(result.conflicts.join(" "), /only one is permitted/);
+});
+
+test("mission JSON preserves allocations, detects changed scenarios, and rejects malformed packages", () => {
+  const input = fixture();
+  input.platforms.push({ ...input.platforms[0], platform_name: "target", side: "red", type: "target-type", weapons: [] });
+  input.lethality[0].platformType = "target-type";
+  const original = validateAndNormalize(input);
+  const filters = defaultFilters();
+  const candidate = generateCandidates(original.data, original.indexes, filters, "standard")[0];
+  const saved = JSON.parse(JSON.stringify(createMissionPackage(original.data, filters, [candidate], false)));
+  assert.equal(evaluateMission(original.data, original.indexes, saved).results[0].status, "feasible");
+  const minimal = { ...saved };
+  delete minimal.scenarioDataFingerprint;
+  delete minimal.permitDuplicateTargets;
+  const restored = validateMissionPackage(minimal);
+  assert.equal(restored.permitDuplicateTargets, false);
+  assert.equal(evaluateMission(original.data, original.indexes, restored).scenarioChanged, true);
+  input.platforms[0].weapons[0].quantity = 4;
+  let changed = validateAndNormalize(input);
+  let result = evaluateMission(changed.data, changed.indexes, saved);
+  assert.equal(result.scenarioChanged, true);
+  assert.equal(result.results[0].status, "warning");
+  assert.match(result.results[0].differences.join(" "), /shooterLoadedQuantity: saved 3; current 4/);
+  input.lethality[0].quantity = 3;
+  changed = validateAndNormalize(input);
+  result = evaluateMission(changed.data, changed.indexes, saved);
+  assert.equal(result.results[0].status, "conflict");
+  assert.match(result.conflicts.join(" "), /saved allocation was not replaced/);
+  assert.equal(result.results[0].candidate.requiredQuantity, 2);
+  input.lethality[0].quantity = 2;
+  input.platforms[0].weapons[0].quantity = 1;
+  changed = validateAndNormalize(input);
+  result = evaluateMission(changed.data, changed.indexes, saved);
+  assert.match(result.conflicts.join(" "), /saved allocation exceeds available inventory/);
+  assert.equal(result.results[0].candidate.requiredQuantity, 2);
+  saved.selectedCandidateSnapshots[0].requiredQuantity = -1;
+  assert.throws(() => validateMissionPackage(saved), /Invalid mission candidate snapshot/);
+});
+
 test("hybrids count positive exact allocations from distinct shooters and respect reserve", () => {
   const result = engagementFixture();
   const filters = defaultFilters();
@@ -348,8 +429,13 @@ test("offline page loads fixed scripts, inspects, exports and handles missing in
         set value(value) { for (const option of this.children) option.selected = option.value === value; }
       };
     }
-    formControls.maxDistanceMeters = { value: "", valueAsNumber: NaN };
-    formControls.minimumReserveByWeapon = { valueAsNumber: 0 };
+    const numberControl = initial => ({
+      value: initial,
+      get valueAsNumber() { return this.value === "" ? NaN : Number(this.value); },
+      set valueAsNumber(value) { this.value = String(value); }
+    });
+    formControls.maxDistanceMeters = numberControl("");
+    formControls.minimumReserveByWeapon = numberControl("0");
     formControls.includeStandardEngagements = { checked: true };
     formControls.includeHybridEngagements = { checked: true };
     const form = {
@@ -397,6 +483,37 @@ test("offline page loads fixed scripts, inspects, exports and handles missing in
   assert.equal(loaded.elements.get("candidate-page").textContent, "Page 2 of 11");
   loaded.elements.get("candidate-rows").children[0].children[6].children[0].click();
   assert.match(loaded.elements.get("candidate-explanation").textContent, /Qualifies because/);
+  loaded.elements.get("candidate-rows").children[0].children[6].children[1].click();
+  assert.equal(loaded.elements.get("mission-rows").children.length, 1);
+  assert.match(loaded.elements.get("mission-status").textContent, /Inventory-feasible/);
+  loaded.elements.get("save-mission").click();
+  const savedMission = JSON.parse(await loaded.downloads[0].blob.text());
+  assert.equal(savedMission.selectedCandidateIds.length, 1);
+  const firstTarget = loaded.elements.get("mission-rows").children[0].children[2].textContent;
+  const duplicate = loaded.elements.get("candidate-rows").children.find(row =>
+    row.children[1].textContent === firstTarget && !row.children[6].children[1].disabled);
+  assert.ok(duplicate);
+  duplicate.children[6].children[1].click();
+  assert.match(loaded.elements.get("mission-error").textContent, /already has a planned engagement/);
+  loaded.elements.get("permit-duplicates").checked = true;
+  loaded.elements.get("permit-duplicates").events.change();
+  duplicate.children[6].children[1].click();
+  assert.equal(loaded.elements.get("mission-rows").children.length, 2);
+  assert.match(loaded.elements.get("duplicate-warning").textContent, /NOT enforced/);
+  loaded.elements.get("permit-duplicates").checked = false;
+  loaded.elements.get("permit-duplicates").events.change();
+  assert.match(loaded.elements.get("mission-conflicts").children.map(item => item.textContent).join(" "), /only one is permitted/);
+  loaded.elements.get("mission-rows").children[1].children[6].children[0].click();
+  await loaded.elements.get("load-mission").events.change({ target: {
+    files: [{ text: async () => JSON.stringify(savedMission) }], value: "mission.json"
+  } });
+  assert.equal(loaded.elements.get("mission-rows").children.length, 1);
+  assert.equal(loaded.elements.get("permit-duplicates").checked, false);
+  await loaded.elements.get("load-mission").events.change({ target: {
+    files: [{ text: async () => "{broken" }], value: "bad.json"
+  } });
+  assert.match(loaded.elements.get("mission-error").textContent, /Unable to load mission/);
+  assert.equal(loaded.elements.get("mission-rows").children.length, 1);
   loaded.elements.get("candidate-kind").value = "hybrid";
   loaded.elements.get("candidate-kind").events.change();
   assert.equal(loaded.elements.get("candidate-rows").children.length, 0);
@@ -405,10 +522,10 @@ test("offline page loads fixed scripts, inspects, exports and handles missing in
   assert.equal(loaded.elements.get("candidate-rows").children.length, 25);
   loaded.elements.get("export-csv").click();
   loaded.elements.get("export-json").click();
-  assert.deepEqual(loaded.downloads.map(download => download.name), ["hybrid-candidates.csv", "filtered-engagements.json"]);
-  const csv = await loaded.downloads[0].blob.text();
+  assert.deepEqual(loaded.downloads.map(download => download.name), ["mission-package.json", "hybrid-candidates.csv", "filtered-engagements.json"]);
+  const csv = await loaded.downloads[1].blob.text();
   assert.equal(csv.split("\r\n").length, 2288);
-  const exported = JSON.parse(await loaded.downloads[1].blob.text());
+  const exported = JSON.parse(await loaded.downloads[2].blob.text());
   assert.equal(exported.candidates.standard.length, 260);
   assert.equal(exported.candidates.hybrid.length, 2287);
   assert.equal(exported.summary.standardCandidates, 260);
@@ -416,7 +533,7 @@ test("offline page loads fixed scripts, inspects, exports and handles missing in
   loaded.elements.get("candidate-search").events.input();
   assert.match(loaded.elements.get("candidate-count").textContent, /0 matching/);
   loaded.elements.get("export-json").click();
-  const searched = JSON.parse(await loaded.downloads[2].blob.text());
+  const searched = JSON.parse(await loaded.downloads[3].blob.text());
   assert.deepEqual(searched.candidates, { standard: [], hybrid: [] });
   assert.equal(searched.summary.standardCandidates, 260);
   loaded.elements.get("diagnostic-shooter").value = "blue_ship_1";

@@ -26,7 +26,7 @@
     <section aria-labelledby="assumptions-heading">
       <h2 id="assumptions-heading">Active assumptions</h2>
       <ul id="assumptions"></ul>
-      <p>These are independent candidate counts, not an executable mission plan. Inventory is not consumed across candidates.</p>
+      <p>Candidate counts are independent; inventory is aggregated only in the mission-selection tray. Feasibility does not establish operational executability.</p>
     </section>
     <section aria-labelledby="filters-heading">
       <h2 id="filters-heading">Engagement filters</h2>
@@ -93,7 +93,7 @@
       <p id="candidate-count" role="status">Candidate details not loaded.</p>
       <div class="table-scroll">
         <table>
-          <thead><tr><th>Shooter(s)</th><th>Target</th><th>Weapon</th><th>Distance (m)</th><th>Required</th><th>Allocation</th><th>Details</th></tr></thead>
+          <thead><tr><th>Shooter(s)</th><th>Target</th><th>Weapon</th><th>Distance (m)</th><th>Required</th><th>Allocation</th><th>Details / mission</th></tr></thead>
           <tbody id="candidate-rows"></tbody>
         </table>
       </div>
@@ -108,6 +108,34 @@
       </div>
       <p><button id="diagnose" type="button">Explain pair</button></p>
       <div id="diagnostic-result" role="status"></div>
+    </section>
+    <section id="mission" aria-labelledby="mission-heading" hidden>
+      <h2 id="mission-heading">Selected mission package</h2>
+      <p>Inventory feasibility only: time, movement, launch sequencing, sensors, and target reactions are not modeled.</p>
+      <p><label><input id="permit-duplicates" type="checkbox"> Permit duplicate target engagements</label></p>
+      <p id="duplicate-warning" class="invalid" role="status"></p>
+      <p id="scenario-warning" class="invalid" role="status"></p>
+      <p id="mission-error" class="invalid" role="alert"></p>
+      <p id="mission-status" role="status"></p>
+      <dl id="mission-summary"></dl>
+      <h3>Selected engagements</h3>
+      <div class="table-scroll"><table>
+        <thead><tr><th>Type</th><th>Shooter(s)</th><th>Target</th><th>Weapon</th><th>Allocation</th><th>Status</th><th>Remove</th></tr></thead>
+        <tbody id="mission-rows"></tbody>
+      </table></div>
+      <h3>Planned expenditure by weapon</h3>
+      <ul id="mission-expenditure"></ul>
+      <h3>Platform inventory after reserve</h3>
+      <div class="table-scroll"><table>
+        <thead><tr><th>Platform</th><th>Weapon</th><th>Loaded</th><th>Reserve</th><th>Available</th><th>Planned</th><th>Remaining</th><th>Deficit</th></tr></thead>
+        <tbody id="mission-inventory"></tbody>
+      </table></div>
+      <h3>Conflicts</h3>
+      <ul id="mission-conflicts"></ul>
+      <h3>Changes from saved candidate snapshots</h3>
+      <ul id="mission-differences"></ul>
+      <p><button id="save-mission" type="button">Save mission JSON</button>
+        <label>Load mission JSON <input id="load-mission" type="file" accept=".json,application/json"></label></p>
     </section>
     <noscript>JavaScript must be enabled to validate the scenario data.</noscript>
   </main>
