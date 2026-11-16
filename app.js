@@ -228,7 +228,112 @@ const MissionData = (() => {
     return 2 * 6371000 * Math.asin(Math.sqrt(Math.min(1, Math.max(0, h))));
   }
 
-  return { validateAndNormalize, distanceMeters };
+  function defaultFilters() {
+    return {
+      shooterSide: SCENARIO_RULES.defaultShooterSide,
+      targetSide: SCENARIO_RULES.defaultTargetSide,
+      shooterPlatformNames: [], targetPlatformNames: [],
+      shooterGroups: [], targetGroups: [],
+      shooterSubgroups: [], targetSubgroups: [],
+      shooterTypes: [], targetTypes: [],
+      weaponNames: [], categories: [],
+      maxDistanceMeters: null,
+      includeStandardEngagements: true,
+      includeHybridEngagements: true,
+      minimumReserveByWeapon: 0
+    };
+  }
+
+  function summarizeEngagements(data, indexes, filters) {
+    if (SCENARIO_RULES.requireOpposingSides && filters.shooterSide === filters.targetSide) {
+      throw new Error("Shooter and target sides must be different.");
+    }
+    if (!Number.isSafeInteger(filters.minimumReserveByWeapon) || filters.minimumReserveByWeapon < 0) {
+      throw new Error("Minimum reserve must be a non-negative safe integer.");
+    }
+    if (filters.maxDistanceMeters !== null &&
+        (!Number.isFinite(filters.maxDistanceMeters) || filters.maxDistanceMeters < 0)) {
+      throw new Error("Maximum distance must be a non-negative number of meters.");
+    }
+
+    function matches(platform, prefix) {
+      const selected = (list, value) => !list.length || list.includes(value);
+      return selected(filters[`${prefix}PlatformNames`], platform.platform_name) &&
+        selected(filters[`${prefix}Groups`], platform.group) &&
+        (!filters[`${prefix}Subgroups`].length ||
+          platform.subgroups.some(group => filters[`${prefix}Subgroups`].includes(group))) &&
+        selected(filters[`${prefix}Types`], platform.type) &&
+        selected(filters.categories, platform.category);
+    }
+
+    const shooters = (indexes.platformsBySide.get(filters.shooterSide) || []).filter(p => matches(p, "shooter"));
+    const targets = (indexes.platformsBySide.get(filters.targetSide) || []).filter(p => matches(p, "target"));
+    const summary = {
+      shooterCount: shooters.length, targetCount: targets.length,
+      pairCount: 0, distanceQualifiedPairs: 0, lethalityMatches: 0, rangeQualified: 0,
+      standardCandidates: 0, hybridPatterns: 0, eligibleTargets: 0,
+      byWeapon: new Map(), byTargetType: new Map(),
+      byShooterGroup: new Map(), byTargetGroup: new Map()
+    };
+    const distances = new Map();
+    const eligible = new Set();
+    const increment = (map, key) => map.set(key, (map.get(key) || 0) + 1);
+    for (const target of targets) {
+      const hybridByWeapon = new Map();
+      for (const shooter of shooters) {
+        if (shooter.platform_name === target.platform_name) continue;
+        summary.pairCount++;
+        if (!distances.has(shooter.platform_name)) distances.set(shooter.platform_name, new Map());
+        const shooterDistances = distances.get(shooter.platform_name);
+        const key = `${shooter.platform_name}::${target.platform_name}`;
+        if (!shooterDistances.has(key)) shooterDistances.set(key, distanceMeters(shooter, target));
+        const distance = shooterDistances.get(key);
+        if (filters.maxDistanceMeters !== null && distance > filters.maxDistanceMeters) continue;
+        summary.distanceQualifiedPairs++;
+        for (const item of shooter.weapons) {
+          if (filters.weaponNames.length && !filters.weaponNames.includes(item.name)) continue;
+          const weapon = indexes.weaponByName.get(item.name);
+          const lethality = indexes.lethalityByWeaponAndTargetType.get(item.name)?.get(target.type);
+          if (!weapon || !lethality) continue;
+          summary.lethalityMatches++;
+          if (distance < weapon.weapon_min_range || distance > weapon.weapon_max_range) continue;
+          summary.rangeQualified++;
+          const available = Math.max(0, item.quantity - filters.minimumReserveByWeapon);
+          if (filters.includeStandardEngagements && available >= lethality.quantity) {
+            summary.standardCandidates++;
+            eligible.add(target.platform_name);
+            increment(summary.byWeapon, item.name);
+            increment(summary.byTargetType, target.type);
+            increment(summary.byShooterGroup, shooter.group);
+            increment(summary.byTargetGroup, target.group);
+          }
+          if (filters.includeHybridEngagements && available > 0) {
+            if (!hybridByWeapon.has(item.name)) hybridByWeapon.set(item.name, []);
+            hybridByWeapon.get(item.name).push({ available, required: lethality.quantity });
+          }
+        }
+      }
+      if (filters.includeHybridEngagements) {
+        for (const contributors of hybridByWeapon.values()) {
+          for (let a = 0; a < contributors.length; a++) {
+            for (let b = a + 1; b < contributors.length; b++) {
+              const required = contributors[a].required;
+              const lower = Math.max(1, required - contributors[b].available);
+              const upper = Math.min(contributors[a].available, required - 1);
+              summary.hybridPatterns += Math.max(0, upper - lower + 1);
+              if (!Number.isSafeInteger(summary.hybridPatterns)) {
+                throw new Error("Hybrid allocation count exceeds the safe integer limit.");
+              }
+            }
+          }
+        }
+      }
+    }
+    summary.eligibleTargets = eligible.size;
+    return summary;
+  }
+
+  return { validateAndNormalize, distanceMeters, defaultFilters, summarizeEngagements };
 })();
 
 function renderStatus(input, result) {
@@ -284,13 +389,124 @@ function isDisplayableSide(platform) {
     typeof platform.side === "string" && platform.side.trim() !== "";
 }
 
+function initializeEngagements(result) {
+  const form = document.getElementById("filters");
+  if (result.errors.length) {
+    form.hidden = true;
+    document.getElementById("results").hidden = true;
+    document.getElementById("calculation-error").textContent = "Calculations are unavailable until input errors are fixed.";
+    return;
+  }
+  const { data, indexes } = result;
+  const defaults = MissionData.defaultFilters();
+  const controls = {
+    shooterSide: "side", targetSide: "side",
+    shooterPlatformNames: "platform_name", targetPlatformNames: "platform_name",
+    shooterGroups: "group", targetGroups: "group",
+    shooterSubgroups: "subgroups", targetSubgroups: "subgroups",
+    shooterTypes: "type", targetTypes: "type",
+    categories: "category"
+  };
+  for (const [name, property] of Object.entries(controls)) {
+    const values = new Set(data.platforms.flatMap(platform =>
+      Array.isArray(platform[property]) ? platform[property] : [platform[property]]
+    ));
+    if (property === "side") values.add(defaults[name]);
+    populateSelect(form.elements[name], values, defaults[name]);
+  }
+  populateSelect(form.elements.weaponNames, new Set(data.platforms.flatMap(p => p.weapons.map(w => w.name))));
+
+  form.addEventListener("submit", event => {
+    event.preventDefault();
+    const filters = MissionData.defaultFilters();
+    for (const name of Object.keys(controls).concat("weaponNames")) {
+      const control = form.elements[name];
+      filters[name] = control.multiple
+        ? Array.from(control.selectedOptions, option => option.value)
+        : control.value;
+    }
+    filters.maxDistanceMeters = form.elements.maxDistanceMeters.value === ""
+      ? null : form.elements.maxDistanceMeters.valueAsNumber;
+    filters.minimumReserveByWeapon = form.elements.minimumReserveByWeapon.valueAsNumber;
+    filters.includeStandardEngagements = form.elements.includeStandardEngagements.checked;
+    filters.includeHybridEngagements = form.elements.includeHybridEngagements.checked;
+    const error = document.getElementById("calculation-error");
+    let summary;
+    try {
+      summary = MissionData.summarizeEngagements(data, indexes, filters);
+      error.textContent = "";
+    } catch (problem) {
+      error.textContent = problem.message;
+      document.getElementById("results").hidden = true;
+      return;
+    }
+    renderSummary(summary, filters);
+  });
+  form.requestSubmit();
+}
+
+function populateSelect(select, values, selected) {
+  for (const value of [...values].sort()) {
+    const option = document.createElement("option");
+    option.value = value;
+    option.textContent = value;
+    option.selected = value === selected;
+    select.append(option);
+  }
+}
+
+function renderSummary(summary, filters) {
+  const results = document.getElementById("results");
+  results.hidden = false;
+  const counts = document.getElementById("summary-counts");
+  counts.replaceChildren();
+  const countRows = [
+    ["Selected shooters", summary.shooterCount],
+    ["Selected targets", summary.targetCount],
+    ["Shooter-target pairs", summary.pairCount],
+    ["Pairs within maximum distance filter", summary.distanceQualifiedPairs],
+    ["Weapon-target lethality matches", summary.lethalityMatches],
+    ["Configured geometric-range qualified combinations", summary.rangeQualified],
+    ["Standard engagement candidates", filters.includeStandardEngagements ? summary.standardCandidates : "Not included"],
+    ["Eligible targets (at least one standard candidate)", filters.includeStandardEngagements ? summary.eligibleTargets : "Not included"],
+    ["Pairwise hybrid allocation patterns", filters.includeHybridEngagements ? summary.hybridPatterns : "Not included"]
+  ];
+  for (const [label, value] of countRows) {
+    const term = document.createElement("dt");
+    const description = document.createElement("dd");
+    term.textContent = label;
+    description.textContent = String(value);
+    counts.append(term, description);
+  }
+  for (const [id, map] of [
+    ["by-weapon", summary.byWeapon], ["by-target-type", summary.byTargetType],
+    ["by-shooter-group", summary.byShooterGroup], ["by-target-group", summary.byTargetGroup]
+  ]) {
+    const list = document.getElementById(id);
+    list.replaceChildren();
+    if (!filters.includeStandardEngagements || !map.size) {
+      const item = document.createElement("li");
+      item.textContent = filters.includeStandardEngagements ? "None." : "Standard candidates not included.";
+      list.append(item);
+    } else {
+      for (const [name, count] of [...map].sort(([a], [b]) => a.localeCompare(b))) {
+        const item = document.createElement("li");
+        item.textContent = `${name}: ${count}`;
+        list.append(item);
+      }
+    }
+  }
+}
+
 if (typeof window !== "undefined" && typeof document !== "undefined") {
   const input = {
     platforms: window.PLATFORM_DATA,
     weapons: window.WEAPON_DATA,
     lethality: window.WEAPON_LETHALITY_DATA
   };
-  renderStatus(input, MissionData.validateAndNormalize(input));
+  const result = MissionData.validateAndNormalize(input);
+  renderStatus(input, result);
+  initializeEngagements(result);
 }
 
 if (typeof module !== "undefined" && module.exports) {

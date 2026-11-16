@@ -37,6 +37,25 @@ dd {
   margin: 0;
 }
 
+.filter-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(13rem, 1fr));
+  gap: 1rem;
+}
+
+.filter-grid label {
+  display: grid;
+  gap: 0.3rem;
+}
+
+select, input, button {
+  font: inherit;
+}
+
+select[multiple] {
+  min-height: 5rem;
+}
+
 li {
   margin: 0.25rem 0;
   overflow-wrap: anywhere;

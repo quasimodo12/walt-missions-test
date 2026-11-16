@@ -13,7 +13,7 @@
 <body>
   <main>
     <h1>Mission Identifier</h1>
-    <p>Offline scenario data validation</p>
+    <p>Offline scenario data and engagement counts</p>
     <section aria-labelledby="status-heading">
       <h2 id="status-heading">Data status</h2>
       <p id="validation-status" role="status">Checking input data...</p>
@@ -26,7 +26,47 @@
     <section aria-labelledby="assumptions-heading">
       <h2 id="assumptions-heading">Active assumptions</h2>
       <ul id="assumptions"></ul>
-      <p>Mission calculations are not available in this phase.</p>
+      <p>These are independent candidate counts, not an executable mission plan. Inventory is not consumed across candidates.</p>
+    </section>
+    <section aria-labelledby="filters-heading">
+      <h2 id="filters-heading">Engagement filters</h2>
+      <p>Leave multi-select filters unselected for no restriction. Use Ctrl or Command to select multiple values.</p>
+      <p>Apply a reserve separately to each shooter's inventory of each weapon. Hybrid patterns use two distinct shooters with the same weapon and an exact, positive split of the required quantity.</p>
+      <form id="filters">
+        <div class="filter-grid">
+          <label>Shooter side <select name="shooterSide" required></select></label>
+          <label>Target side <select name="targetSide" required></select></label>
+          <label>Shooter platforms <select name="shooterPlatformNames" multiple></select></label>
+          <label>Target platforms <select name="targetPlatformNames" multiple></select></label>
+          <label>Shooter groups <select name="shooterGroups" multiple></select></label>
+          <label>Target groups <select name="targetGroups" multiple></select></label>
+          <label>Shooter subgroups <select name="shooterSubgroups" multiple></select></label>
+          <label>Target subgroups <select name="targetSubgroups" multiple></select></label>
+          <label>Shooter types <select name="shooterTypes" multiple></select></label>
+          <label>Target types <select name="targetTypes" multiple></select></label>
+          <label>Weapons <select name="weaponNames" multiple></select></label>
+          <label>Categories (both sides) <select name="categories" multiple></select></label>
+          <label>Maximum distance (meters) <input name="maxDistanceMeters" type="number" min="0" step="any"></label>
+          <label>Minimum reserve per weapon per shooter <input name="minimumReserveByWeapon" type="number" min="0" step="1" value="0" required></label>
+        </div>
+        <p><label><input name="includeStandardEngagements" type="checkbox" checked> Include standard engagement candidates</label></p>
+        <p><label><input name="includeHybridEngagements" type="checkbox" checked> Include pairwise hybrid allocation patterns</label></p>
+        <button type="submit">Calculate counts</button>
+      </form>
+      <p id="calculation-error" class="invalid" role="alert"></p>
+    </section>
+    <section id="results" aria-labelledby="results-heading" hidden>
+      <h2 id="results-heading">Configured geometric-range results</h2>
+      <p>Lethality matches and range-qualified combinations are counted after platform, weapon, and maximum-distance filters, before the inventory reserve test. Data warnings above may affect these counts.</p>
+      <dl id="summary-counts"></dl>
+      <h3>Standard candidates by weapon</h3>
+      <ul id="by-weapon"></ul>
+      <h3>Standard candidates by target type</h3>
+      <ul id="by-target-type"></ul>
+      <h3>Standard candidates by shooter group</h3>
+      <ul id="by-shooter-group"></ul>
+      <h3>Standard candidates by target group</h3>
+      <ul id="by-target-group"></ul>
     </section>
     <noscript>JavaScript must be enabled to validate the scenario data.</noscript>
   </main>
