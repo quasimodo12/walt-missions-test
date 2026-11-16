@@ -12,7 +12,7 @@ const SCENARIO_RULES = Object.freeze({
 });
 
 // The data layer has no dependency on the DOM or the source of the arrays.
-const MissionData = (() => {
+function createMissionData() {
   function isRecord(value) {
     return value !== null && typeof value === "object" && !Array.isArray(value);
   }
@@ -259,7 +259,7 @@ const MissionData = (() => {
     return [kind, ...parts.map(part => encodeURIComponent(String(part)))].join("::");
   }
 
-  function summarizeEngagements(data, indexes, filters, collect = null) {
+  function summarizeEngagements(data, indexes, filters, collect = null, checkpoint = null) {
     if (SCENARIO_RULES.requireOpposingSides && filters.shooterSide === filters.targetSide) {
       throw new Error("Shooter and target sides must be different.");
     }
@@ -284,8 +284,10 @@ const MissionData = (() => {
     const eligible = new Set();
     const increment = (map, key) => map.set(key, (map.get(key) || 0) + 1);
     for (const target of targets) {
+      checkpoint?.();
       const hybridByWeapon = new Map();
       for (const shooter of shooters) {
+        checkpoint?.();
         if (shooter.platform_name === target.platform_name) continue;
         summary.pairCount++;
         if (!distances.has(shooter.platform_name)) distances.set(shooter.platform_name, new Map());
@@ -296,6 +298,7 @@ const MissionData = (() => {
         if (filters.maxDistanceMeters !== null && distance > filters.maxDistanceMeters) continue;
         summary.distanceQualifiedPairs++;
         for (const item of shooter.weapons) {
+          checkpoint?.();
           if (filters.weaponNames.length && !filters.weaponNames.includes(item.name)) continue;
           const weapon = indexes.weaponByName.get(item.name);
           const lethality = indexes.lethalityByWeaponAndTargetType.get(item.name)?.get(target.type);
@@ -335,6 +338,7 @@ const MissionData = (() => {
           if (collect?.hybrid) contributors.sort((a, b) => a.shooter.platform_name < b.shooter.platform_name ? -1 : a.shooter.platform_name > b.shooter.platform_name ? 1 : 0);
           for (let a = 0; a < contributors.length; a++) {
             for (let b = a + 1; b < contributors.length; b++) {
+              checkpoint?.();
               const required = contributors[a].required;
               const lower = Math.max(1, required - contributors[b].available);
               const upper = Math.min(contributors[a].available, required - 1);
@@ -345,6 +349,7 @@ const MissionData = (() => {
               if (collect?.hybrid) {
                 const first = contributors[a], second = contributors[b];
                 for (let allocation = lower; allocation <= upper; allocation++) {
+                  checkpoint?.();
                   const other = required - allocation;
                   collect.hybrid({
                     id: candidateId("hyb", first.shooter.platform_name, second.shooter.platform_name, target.platform_name, first.item.name, allocation, other),
@@ -618,7 +623,8 @@ const MissionData = (() => {
   }
 
   return { validateAndNormalize, distanceMeters, defaultFilters, summarizeEngagements, generateCandidates, diagnosePair, filterAndSortCandidates, candidatesCsv, exportPackage, validateMissionPackage, createMissionPackage, evaluateMission };
-})();
+}
+const MissionData = createMissionData();
 
 function renderStatus(input, result) {
   const status = document.getElementById("validation-status");
@@ -716,6 +722,7 @@ function initializeEngagements(result) {
     form.requestSubmit();
   }, () => inspection.refresh());
   inspection = initializeInspection(data, indexes, mission);
+  const optimizer = initializeOptimizer(data, indexes);
 
   form.addEventListener("submit", event => {
     event.preventDefault();
@@ -740,11 +747,13 @@ function initializeEngagements(result) {
       error.textContent = problem.message;
       document.getElementById("results").hidden = true;
       document.getElementById("inspection").hidden = true;
+      optimizer.invalidate("Filters are invalid; apply valid filters before optimizing.");
       return;
     }
     renderSummary(summary, filters);
     inspection.setResults(filters, summary);
     mission.setFilters(filters);
+    optimizer.setFilters(filters);
   });
   form.requestSubmit();
 }
@@ -896,6 +905,162 @@ function downloadFile(name, content, type) {
   link.download = name;
   link.click();
   setTimeout(() => URL.revokeObjectURL(url), 0);
+}
+
+function initializeOptimizer(data, indexes) {
+  const element = id => document.getElementById(id);
+  let filters = null, worker = null, timer = null, workerUrl = null;
+  let latest = null, started = 0, proposal = null, objectives = null;
+  function stopWorker() {
+    if (worker) worker.terminate();
+    worker = null;
+    if (timer !== null) clearTimeout(timer);
+    timer = null;
+    if (workerUrl) URL.revokeObjectURL(workerUrl);
+    workerUrl = null;
+    element("optimize-start").disabled = false;
+    element("optimize-cancel").disabled = true;
+  }
+  function clearResult() {
+    proposal = null;
+    element("optimize-save").disabled = true;
+    for (const id of ["optimizer-summary", "optimizer-rows", "optimizer-inventory", "optimizer-audit"]) element(id).replaceChildren();
+    element("optimizer-status").textContent = "";
+    element("optimizer-filters").textContent = "";
+    element("optimizer-error").textContent = "";
+  }
+  function addRow(parent, values) {
+    const row = document.createElement("tr");
+    for (const value of values) {
+      const cell = document.createElement("td");
+      cell.textContent = String(value);
+      row.append(cell);
+    }
+    parent.append(row);
+  }
+  function finish(result) {
+    stopWorker();
+    clearResult();
+    element("optimizer-progress").textContent = "Search finished.";
+    element("optimizer-status").textContent = `Search status: ${result.status}${result.reason ? ` — ${result.reason}` : ""}.`;
+    element("optimizer-filters").textContent = `Applied filters: ${JSON.stringify(filters)}`;
+    const summary = element("optimizer-summary");
+    const fields = [
+      ["Targets covered", result.selected.length],
+      ["Total weapon expenditure", result.expenditure],
+      ["Distinct shooters", result.shooters],
+      ["Objectives", `Maximum target coverage${objectives.minimizeExpenditure ? "; minimum expenditure" : ""}${objectives.minimizeShooters ? "; minimum shooters" : ""}`],
+      ["Runtime", `${Math.round(result.runtimeMs)} ms`],
+      ["Search nodes", result.nodes],
+      ["Candidate pool / retained", `${result.inputCount}${result.poolComplete ? "" : " (partial)"} / ${result.retainedCount}${result.preprocessingComplete ? "" : " (partial)"}`],
+      ["Pruned candidates", `${result.audit.length}${result.preprocessingComplete ? "" : " recorded so far"}`]
+    ];
+    for (const [label, value] of fields) {
+      const term = document.createElement("dt"), description = document.createElement("dd");
+      term.textContent = label;
+      description.textContent = String(value);
+      summary.append(term, description);
+    }
+    const audit = element("optimizer-audit");
+    for (const entry of result.audit) {
+      const item = document.createElement("li");
+      item.textContent = `${entry.id}: ${entry.reason}; preferred candidate ${entry.retainedId}.`;
+      audit.append(item);
+    }
+    if (!result.audit.length) {
+      const item = document.createElement("li");
+      item.textContent = "None recorded.";
+      audit.append(item);
+    }
+    if (!result.selected.length) return;
+    const candidatePackage = MissionData.createMissionPackage(data, filters, result.selected, false);
+    const assessment = MissionData.evaluateMission(data, indexes, candidatePackage);
+    if (!assessment.feasible) throw new Error(`Proposal failed mission validation: ${assessment.conflicts.join(" ")}`);
+    proposal = candidatePackage;
+    element("optimize-save").disabled = false;
+    for (const candidate of result.selected) {
+      const shooters = candidate.kind === "standard" ? candidate.shooterPlatform : `${candidate.shooterAPlatform} + ${candidate.shooterBPlatform}`;
+      const allocation = candidate.kind === "standard" ? candidate.requiredQuantity : `${candidate.shooterAAllocatedQuantity} + ${candidate.shooterBAllocatedQuantity}`;
+      addRow(element("optimizer-rows"), [candidate.id, candidate.kind, shooters, candidate.targetPlatform, candidate.weapon, allocation]);
+    }
+    for (const item of assessment.inventory) {
+      addRow(element("optimizer-inventory"), [item.platform, item.weapon, item.loaded, item.reserve, item.planned, item.remaining, item.deficit]);
+    }
+  }
+  function fail(error) {
+    stopWorker();
+    clearResult();
+    element("optimizer-progress").textContent = "Search failed.";
+    element("optimizer-error").textContent = error.message;
+  }
+  function interrupted(reason) {
+    const partial = latest || { selected: [], expenditure: 0, shooters: 0, nodes: 0, inputCount: 0, retainedCount: 0, audit: [] };
+    try {
+      finish({ ...partial, status: partial.selected.length ? "feasible but not proven optimal" : "limit reached",
+        reason, runtimeMs: Date.now() - started });
+    } catch (error) { fail(error); }
+  }
+  element("optimize-start").addEventListener("click", () => {
+    stopWorker();
+    clearResult();
+    latest = null;
+    started = Date.now();
+    objectives = {
+      minimizeExpenditure: element("optimize-expenditure").checked,
+      minimizeShooters: element("optimize-shooters").checked
+    };
+    try {
+      const source = `"use strict"; const SCENARIO_RULES = ${JSON.stringify(SCENARIO_RULES)};\n` +
+        `${createMissionData.toString()}\n${createOptimizer.toString()}\n(${optimizerWorkerMain.toString()})();`;
+      workerUrl = URL.createObjectURL(new Blob([source], { type: "text/javascript" }));
+      const active = new Worker(workerUrl);
+      worker = active;
+      element("optimize-start").disabled = true;
+      element("optimize-cancel").disabled = false;
+      element("optimizer-progress").textContent = "Starting worker...";
+      active.onmessage = event => {
+        if (worker !== active) return;
+        const message = event.data;
+        if (message.type === "progress") {
+          latest = message.update;
+          element("optimizer-progress").textContent = `${latest.phase}: ${latest.nodes} nodes, ${latest.selected.length} targets covered.`;
+        } else if (message.type === "result") {
+          latest = message.result;
+          if (Date.now() - started >= 5000) interrupted("Wall-clock budget reached");
+          else {
+            try { finish(message.result); } catch (error) { fail(error); }
+          }
+        } else if (message.type === "error") fail(new Error(message.message));
+      };
+      active.onerror = event => {
+        if (worker === active) fail(new Error(`Optimizer worker failed: ${event.message || "unknown error"}`));
+      };
+      active.postMessage({ data, filters, options: objectives });
+      timer = setTimeout(() => interrupted("Wall-clock budget reached"), Math.max(0, 5000 - (Date.now() - started)));
+    } catch (error) { fail(error); }
+  });
+  element("optimize-cancel").addEventListener("click", () => {
+    if (worker) interrupted("Cancelled by user");
+  });
+  element("optimize-save").addEventListener("click", () => {
+    if (proposal) downloadFile("optimizer-proposal.json", JSON.stringify(proposal, null, 2), "application/json");
+  });
+  return {
+    invalidate(message) {
+      stopWorker();
+      clearResult();
+      filters = null;
+      element("optimizer-progress").textContent = message;
+      element("optimize-start").disabled = true;
+    },
+    setFilters(applied) {
+      stopWorker();
+      clearResult();
+      filters = applied;
+      element("optimizer").hidden = false;
+      element("optimizer-progress").textContent = "Applied filters changed; no current proposal.";
+    }
+  };
 }
 
 function initializeMission(data, indexes, applyFilters, refreshCandidates) {

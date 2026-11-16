@@ -8,6 +8,7 @@
   <script defer src="./platform_details.js"></script>
   <script defer src="./weapon_details.js"></script>
   <script defer src="./weapon_lethality_details.js"></script>
+  <script defer src="./optimizer.js"></script>
   <script defer src="./app.js"></script>
 </head>
 <body>
@@ -136,6 +137,36 @@
       <ul id="mission-differences"></ul>
       <p><button id="save-mission" type="button">Save mission JSON</button>
         <label>Load mission JSON <input id="load-mission" type="file" accept=".json,application/json"></label></p>
+    </section>
+    <section id="optimizer" aria-labelledby="optimizer-heading" hidden>
+      <h2 id="optimizer-heading">Optimizer proposal</h2>
+      <p>Proposes one inventory-feasible package using the applied engagement filters; it does not change the selected mission or enumerate every possible mission.</p>
+      <p>Primary objective: maximize distinct targets. At most one engagement is assigned per target, even if duplicates are permitted in the selection tray.</p>
+      <p><label><input id="optimize-expenditure" type="checkbox" checked> Secondary objective: minimize total weapon expenditure</label></p>
+      <p><label><input id="optimize-shooters" type="checkbox"> Tie-breaker: minimize distinct shooters</label></p>
+      <p>Limits: 5 seconds, 150,000 search nodes, 5,000 candidates, and 60 targets. Time and candidate generation are included in the budget.</p>
+      <p><button id="optimize-start" type="button">Propose mission</button>
+        <button id="optimize-cancel" type="button" disabled>Cancel search</button>
+        <button id="optimize-save" type="button" disabled>Save proposal JSON</button></p>
+      <p id="optimizer-progress" role="status">No proposal yet.</p>
+      <p id="optimizer-error" class="invalid" role="alert"></p>
+      <p id="optimizer-status"></p>
+      <p id="optimizer-filters"></p>
+      <dl id="optimizer-summary"></dl>
+      <h3>Proposed engagements</h3>
+      <div class="table-scroll"><table>
+        <thead><tr><th>Candidate ID</th><th>Type</th><th>Shooter(s)</th><th>Target</th><th>Weapon</th><th>Allocation</th></tr></thead>
+        <tbody id="optimizer-rows"></tbody>
+      </table></div>
+      <h3>Proposal inventory after reserve</h3>
+      <div class="table-scroll"><table>
+        <thead><tr><th>Platform</th><th>Weapon</th><th>Loaded</th><th>Reserve</th><th>Planned</th><th>Remaining</th><th>Deficit</th></tr></thead>
+        <tbody id="optimizer-inventory"></tbody>
+      </table></div>
+      <h3>Candidate pruning audit</h3>
+      <p>Only candidates qualifying under the applied filters enter the pool. Duplicates and candidates dominated on every shooter-weapon resource may be removed.</p>
+      <ul id="optimizer-audit"></ul>
+      <p>Assumptions: configured geometric range and exact lethality; pairwise same-weapon hybrids; no timing, sequencing, sensors, movement, or target reactions. This proposal is not an operational execution or approval.</p>
     </section>
     <noscript>JavaScript must be enabled to validate the scenario data.</noscript>
   </main>

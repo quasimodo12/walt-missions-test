@@ -5,6 +5,8 @@ const test = require("node:test");
 const assert = require("node:assert/strict");
 const fs = require("node:fs");
 const vm = require("node:vm");
+const { Worker: ThreadWorker } = require("node:worker_threads");
+const { createOptimizer } = require("./optimizer.js");
 const { validateAndNormalize, distanceMeters, defaultFilters, summarizeEngagements, generateCandidates,
   diagnosePair, filterAndSortCandidates, candidatesCsv, exportPackage, createMissionPackage,
   validateMissionPackage, evaluateMission } = require("./app.js");
@@ -305,6 +307,140 @@ test("mission JSON preserves allocations, detects changed scenarios, and rejects
   assert.throws(() => validateMissionPackage(saved), /Invalid mission candidate snapshot/);
 });
 
+function optimizerFixture() {
+  const input = fixture();
+  const base = input.platforms[0];
+  base.latitude = 0;
+  base.longitude = 0;
+  base.weapons = [{ name: "A", quantity: 3 }, { name: "B", quantity: 1 }];
+  input.platforms.push(
+    { ...base, platform_name: "ship2", weapons: [{ name: "B", quantity: 1 }] },
+    { ...base, platform_name: "target1", side: "red", type: "X", weapons: [] },
+    { ...base, platform_name: "target2", side: "red", type: "Y", weapons: [] }
+  );
+  input.weapons = ["A", "B"].map(weapon_name => ({ weapon_name, side: "blue", weapon_min_range: 0, weapon_max_range: 1000 }));
+  input.lethality = [
+    { weapon: "A", platformType: "X", quantity: 2 },
+    { weapon: "B", platformType: "X", quantity: 1 },
+    { weapon: "A", platformType: "Y", quantity: 1 }
+  ];
+  return validateAndNormalize(input);
+}
+
+test("bounded optimizer finds maximum coverage and lexicographic objectives without overspending", () => {
+  const { data, indexes } = optimizerFixture();
+  const filters = defaultFilters();
+  const optimizer = createOptimizer(require("./app.js"));
+  const result = optimizer.run(data, indexes, filters, { minimizeExpenditure: true, minimizeShooters: true });
+  assert.equal(result.status, "optimal");
+  assert.equal(result.selected.length, 2);
+  assert.equal(result.expenditure, 2);
+  assert.equal(result.shooters, 1);
+  assert.deepEqual(result.selected.map(c => [c.targetPlatform, c.weapon, c.shooterPlatform]).sort(),
+    [["target1", "B", "ship"], ["target2", "A", "ship"]]);
+  const assessment = evaluateMission(data, indexes, createMissionPackage(data, filters, result.selected, false));
+  assert.equal(assessment.feasible, true);
+  assert.ok(assessment.inventory.every(row => row.deficit === 0));
+  const repeated = optimizer.run(data, indexes, filters, { minimizeExpenditure: true, minimizeShooters: true });
+  assert.deepEqual(repeated.selected.map(c => c.id), result.selected.map(c => c.id));
+});
+
+test("optimizer reports limits and empty pools without claiming incomplete results are optimal", () => {
+  const { data, indexes } = optimizerFixture();
+  const optimizer = createOptimizer(require("./app.js"));
+  const filters = defaultFilters();
+  const limited = optimizer.run(data, indexes, filters, { maxNodes: 1 });
+  assert.equal(limited.status, "feasible but not proven optimal");
+  assert.match(limited.reason, /Search-node/);
+  assert.equal(evaluateMission(data, indexes, createMissionPackage(data, filters, limited.selected, false)).feasible, true);
+  const capped = optimizer.run(data, indexes, filters, { maxCandidates: 1 });
+  assert.equal(capped.status, "limit reached");
+  assert.match(capped.reason, /Candidate pool/);
+  filters.weaponNames = ["no-such-weapon"];
+  assert.equal(optimizer.run(data, indexes, filters).status, "no feasible solution");
+  assert.throws(() => optimizer.run(data, indexes, filters, { timeMs: 5001 }), /Invalid optimizer limit/);
+  let tick = 0;
+  const timed = optimizer.run(data, indexes, defaultFilters(), { timeMs: 1, now: () => tick++ });
+  assert.equal(timed.status, "limit reached");
+  assert.match(timed.reason, /Wall-clock/);
+});
+
+test("optimizer handles pairwise hybrids and reserves as shared constraints", () => {
+  const { data, indexes } = engagementFixture();
+  const filters = defaultFilters();
+  const optimizer = createOptimizer(require("./app.js"));
+  const result = optimizer.run(data, indexes, filters);
+  assert.equal(result.status, "optimal");
+  assert.equal(result.selected.length, 1);
+  assert.equal(result.selected[0].kind, "hybrid");
+  assert.equal(evaluateMission(data, indexes, createMissionPackage(data, filters, result.selected, false)).feasible, true);
+  filters.minimumReserveByWeapon = 1;
+  assert.equal(optimizer.run(data, indexes, filters).status, "no feasible solution");
+});
+
+test("optimizer audits duplicates and resource-dominated choices without pruning tradeoffs", () => {
+  const make = (id, shooterPlatform, requiredQuantity) => ({
+    id, kind: "standard", shooterPlatform, targetPlatform: "target", weapon: "A", requiredQuantity
+  });
+  const items = [make("lower", "ship", 1), make("higher", "ship", 2),
+    make("alternative", "ship2", 1), make("lower", "ship", 1)];
+  const optimizer = createOptimizer({ summarizeEngagements(data, indexes, filters, collect) {
+    items.forEach(item => collect.standard(item));
+  } });
+  const indexes = { inventoryByPlatformAndWeapon: new Map([
+    ["ship", new Map([["A", 2]])], ["ship2", new Map([["A", 1]])]
+  ]) };
+  const result = optimizer.run({}, indexes, defaultFilters());
+  assert.equal(result.status, "optimal");
+  assert.equal(result.retainedCount, 2);
+  assert.deepEqual(result.audit.map(item => [item.id, item.retainedId]).sort(),
+    [["higher", "lower"], ["lower", "lower"]]);
+});
+
+test("optimizer agrees with an exhaustive oracle on small resource-constrained instances", () => {
+  let seed = 9381;
+  const random = maximum => {
+    seed = (seed * 1664525 + 1013904223) >>> 0;
+    return seed % maximum;
+  };
+  for (let trial = 0; trial < 30; trial++) {
+    const groups = Array.from({ length: 4 }, (_, target) => Array.from({ length: 3 }, (_, choice) => {
+      const shooter = `s${random(3)}`, weapon = `w${random(2)}`, quantity = 1 + random(3);
+      return { id: `c${target}-${choice}`, kind: "standard", shooterPlatform: shooter,
+        targetPlatform: `t${target}`, weapon, requiredQuantity: quantity };
+    }));
+    const indexes = { inventoryByPlatformAndWeapon: new Map(
+      ["s0", "s1", "s2"].map(shooter => [shooter, new Map([["w0", 3], ["w1", 3]])])
+    ) };
+    const optimizer = createOptimizer({ summarizeEngagements(data, indexes, filters, collect) {
+      groups.flat().forEach(candidate => collect.standard(candidate));
+    } });
+    const result = optimizer.run({}, indexes, defaultFilters(), { minimizeShooters: true });
+    let best = [-1, Infinity, Infinity];
+    function enumerate(index, usage, selected) {
+      if (index === groups.length) {
+        const score = [selected.length, selected.reduce((sum, item) => sum + item.requiredQuantity, 0),
+          new Set(selected.map(item => item.shooterPlatform)).size];
+        if (score[0] > best[0] || (score[0] === best[0] && (score[1] < best[1] ||
+            (score[1] === best[1] && score[2] < best[2])))) best = score;
+        return;
+      }
+      enumerate(index + 1, usage, selected);
+      for (const candidate of groups[index]) {
+        const key = `${candidate.shooterPlatform}/${candidate.weapon}`;
+        const quantity = (usage.get(key) || 0) + candidate.requiredQuantity;
+        if (quantity > 3) continue;
+        const next = new Map(usage);
+        next.set(key, quantity);
+        enumerate(index + 1, next, [...selected, candidate]);
+      }
+    }
+    enumerate(0, new Map(), []);
+    assert.equal(result.status, "optimal");
+    assert.deepEqual([result.selected.length, result.expenditure, result.shooters], best);
+  }
+});
+
 test("hybrids count positive exact allocations from distinct shooters and respect reserve", () => {
   const result = engagementFixture();
   const filters = defaultFilters();
@@ -402,12 +538,13 @@ test("rejects invalid filter values and same-side selection", () => {
 test("offline page loads fixed scripts, inspects, exports and handles missing inputs", async () => {
   const html = fs.readFileSync("index.html", "utf8");
   const scripts = [...html.matchAll(/<script defer src="\.\/([^"]+)"><\/script>/g)].map(match => match[1]);
-  assert.deepEqual(scripts, ["platform_details.js", "weapon_details.js", "weapon_lethality_details.js", "app.js"]);
+  assert.deepEqual(scripts, ["platform_details.js", "weapon_details.js", "weapon_lethality_details.js", "optimizer.js", "app.js"]);
   assert.doesNotMatch(html, /(?:https?:)?\/\//);
 
   function runPage(sourceFiles) {
     const elements = new Map();
     const downloads = [];
+    const workers = [];
     function element() {
       return {
         children: [], events: {},
@@ -462,14 +599,22 @@ test("offline page loads fixed scripts, inspects, exports and handles missing in
       }
     };
     const blobs = new Map();
+    class FakeWorker {
+      constructor(url) { this.blob = blobs.get(url); workers.push(this); }
+      postMessage(message) { this.message = message; }
+      terminate() { this.terminated = true; }
+    }
     const context = vm.createContext({
-      document, Blob,
+      document, Blob, Worker: FakeWorker,
       URL: { createObjectURL(blob) { const url = `blob:${blobs.size}`; blobs.set(url, blob); return url; }, revokeObjectURL() {} },
-      setTimeout(callback) { callback(); }
+      setTimeout(callback, delay) { if (!delay) callback(); return 1; },
+      clearTimeout() {}
     });
     context.window = context;
     for (const file of sourceFiles) vm.runInContext(fs.readFileSync(file, "utf8"), context, { filename: file });
-    return { elements, form, downloads };
+    document.getElementById("optimize-expenditure").checked = true;
+    document.getElementById("optimize-shooters").checked = false;
+    return { elements, form, downloads, workers };
   }
   const loaded = runPage(scripts);
   assert.equal(loaded.elements.get("validation-status").textContent, "Data validated successfully.");
@@ -514,6 +659,64 @@ test("offline page loads fixed scripts, inspects, exports and handles missing in
   } });
   assert.match(loaded.elements.get("mission-error").textContent, /Unable to load mission/);
   assert.equal(loaded.elements.get("mission-rows").children.length, 1);
+  const shooterOption = loaded.form.elements.shooterPlatformNames.children.find(option => option.value === "blue_ship_1");
+  const targetOption = loaded.form.elements.targetPlatformNames.children.find(option => option.value === "red_ship_1");
+  shooterOption.selected = true;
+  targetOption.selected = true;
+  loaded.form.requestSubmit();
+  loaded.elements.get("optimize-expenditure").checked = true;
+  loaded.elements.get("optimize-start").click();
+  const worker = loaded.workers[0];
+  const workerMessages = [];
+  const workerSource = await worker.blob.text();
+  const workerContext = vm.createContext({
+    performance, self: { postMessage(message) { workerMessages.push(message); worker.onmessage({ data: message }); } }
+  });
+  vm.runInContext(workerSource, workerContext);
+  workerContext.self.onmessage({ data: worker.message });
+  assert.match(loaded.elements.get("optimizer-status").textContent, /optimal/);
+  assert.ok(loaded.elements.get("optimizer-rows").children.length > 0);
+  assert.ok(loaded.elements.get("optimizer-inventory").children.length > 0);
+  assert.equal(loaded.elements.get("mission-rows").children.length, 1);
+  assert.equal(worker.terminated, true);
+  const optimal = workerMessages.find(message => message.type === "result").result;
+  const thread = new ThreadWorker(
+    `const { parentPort } = require("node:worker_threads");
+     globalThis.self = { postMessage: message => parentPort.postMessage(message) };
+     ${workerSource}
+     parentPort.on("message", data => self.onmessage({ data }));`, { eval: true }
+  );
+  try {
+    const threadedResult = await new Promise((resolve, reject) => {
+      const timeout = setTimeout(() => reject(new Error("Worker test timed out")), 10000);
+      thread.on("message", message => {
+        if (message.type === "result") { clearTimeout(timeout); resolve(message.result); }
+        if (message.type === "error") { clearTimeout(timeout); reject(new Error(message.message)); }
+      });
+      thread.on("error", error => { clearTimeout(timeout); reject(error); });
+      thread.postMessage(worker.message);
+    });
+    assert.equal(threadedResult.status, optimal.status);
+    assert.deepEqual(threadedResult.selected.map(candidate => candidate.id), Array.from(optimal.selected, candidate => candidate.id));
+  } finally {
+    await thread.terminate();
+  }
+    loaded.elements.get("optimize-save").click();
+    const savedProposal = JSON.parse(await loaded.downloads[1].blob.text());
+    assert.deepEqual(savedProposal.selectedCandidateIds, Array.from(optimal.selected, candidate => candidate.id));
+  loaded.elements.get("optimize-start").click();
+  const cancelled = loaded.workers[1];
+  cancelled.onmessage({ data: { type: "progress", update: { ...optimal, phase: "Searching" } } });
+  loaded.elements.get("optimize-cancel").click();
+  assert.equal(cancelled.terminated, true);
+  assert.match(loaded.elements.get("optimizer-status").textContent, /feasible but not proven optimal.*Cancelled/);
+  loaded.elements.get("optimize-start").click();
+  loaded.workers[2].onerror({ message: "worker unavailable" });
+  assert.match(loaded.elements.get("optimizer-error").textContent, /worker unavailable/);
+  shooterOption.selected = false;
+  targetOption.selected = false;
+  loaded.form.requestSubmit();
+  assert.equal(loaded.elements.get("optimizer-rows").children.length, 0);
   loaded.elements.get("candidate-kind").value = "hybrid";
   loaded.elements.get("candidate-kind").events.change();
   assert.equal(loaded.elements.get("candidate-rows").children.length, 0);
@@ -522,10 +725,10 @@ test("offline page loads fixed scripts, inspects, exports and handles missing in
   assert.equal(loaded.elements.get("candidate-rows").children.length, 25);
   loaded.elements.get("export-csv").click();
   loaded.elements.get("export-json").click();
-  assert.deepEqual(loaded.downloads.map(download => download.name), ["mission-package.json", "hybrid-candidates.csv", "filtered-engagements.json"]);
-  const csv = await loaded.downloads[1].blob.text();
+  assert.deepEqual(loaded.downloads.map(download => download.name), ["mission-package.json", "optimizer-proposal.json", "hybrid-candidates.csv", "filtered-engagements.json"]);
+  const csv = await loaded.downloads[2].blob.text();
   assert.equal(csv.split("\r\n").length, 2288);
-  const exported = JSON.parse(await loaded.downloads[2].blob.text());
+  const exported = JSON.parse(await loaded.downloads[3].blob.text());
   assert.equal(exported.candidates.standard.length, 260);
   assert.equal(exported.candidates.hybrid.length, 2287);
   assert.equal(exported.summary.standardCandidates, 260);
@@ -533,7 +736,7 @@ test("offline page loads fixed scripts, inspects, exports and handles missing in
   loaded.elements.get("candidate-search").events.input();
   assert.match(loaded.elements.get("candidate-count").textContent, /0 matching/);
   loaded.elements.get("export-json").click();
-  const searched = JSON.parse(await loaded.downloads[3].blob.text());
+  const searched = JSON.parse(await loaded.downloads[4].blob.text());
   assert.deepEqual(searched.candidates, { standard: [], hybrid: [] });
   assert.equal(searched.summary.standardCandidates, 260);
   loaded.elements.get("diagnostic-shooter").value = "blue_ship_1";

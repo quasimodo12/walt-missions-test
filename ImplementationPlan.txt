@@ -721,6 +721,10 @@ Constraints:
    - Runtime and any limit reached.
    - Assumptions used.
 
+### Offline implementation
+
+The application includes `optimizer.js` beside `app.js`; `index.html` loads it before `app.js`. The optimizer runs in a locally created Blob Web Worker, without network access. The primary coverage objective is fixed; expenditure minimization and the shooter-count tie-breaker are configurable. The search is limited to five seconds, 150,000 nodes, 5,000 candidates, and 60 targets. A proposal can be saved as a mission package without replacing the user's selected mission.
+
 ## Acceptance criteria
 
 - The optimizer never exceeds platform inventory.
