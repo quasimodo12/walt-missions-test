@@ -1,0 +1,34 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Mission Identifier</title>
+  <link rel="stylesheet" href="./styles.css">
+  <script defer src="./platform_details.js"></script>
+  <script defer src="./weapon_details.js"></script>
+  <script defer src="./weapon_lethality_details.js"></script>
+  <script defer src="./app.js"></script>
+</head>
+<body>
+  <main>
+    <h1>Mission Identifier</h1>
+    <p>Offline scenario data validation</p>
+    <section aria-labelledby="status-heading">
+      <h2 id="status-heading">Data status</h2>
+      <p id="validation-status" role="status">Checking input data...</p>
+      <dl id="data-counts"></dl>
+      <h3>Validation errors</h3>
+      <ul id="errors"></ul>
+      <h3>Validation warnings</h3>
+      <ul id="warnings"></ul>
+    </section>
+    <section aria-labelledby="assumptions-heading">
+      <h2 id="assumptions-heading">Active assumptions</h2>
+      <ul id="assumptions"></ul>
+      <p>Mission calculations are not available in this phase.</p>
+    </section>
+    <noscript>JavaScript must be enabled to validate the scenario data.</noscript>
+  </main>
+</body>
+</html>

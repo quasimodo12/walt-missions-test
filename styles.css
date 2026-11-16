@@ -1,0 +1,53 @@
+:root {
+  color-scheme: light;
+  font-family: system-ui, sans-serif;
+  color: #1d2939;
+  background: #f3f5f8;
+}
+
+body {
+  margin: 0;
+}
+
+main {
+  max-width: 60rem;
+  margin: 2rem auto;
+  padding: 0 1rem;
+}
+
+section {
+  background: white;
+  border: 1px solid #d0d5dd;
+  border-radius: 0.5rem;
+  margin: 1rem 0;
+  padding: 1rem 1.5rem;
+}
+
+h1, h2, h3 {
+  color: #101828;
+}
+
+dl {
+  display: grid;
+  grid-template-columns: max-content 1fr;
+  gap: 0.35rem 1rem;
+}
+
+dd {
+  margin: 0;
+}
+
+li {
+  margin: 0.25rem 0;
+  overflow-wrap: anywhere;
+}
+
+.invalid {
+  color: #b42318;
+  font-weight: 700;
+}
+
+.valid {
+  color: #067647;
+  font-weight: 700;
+}

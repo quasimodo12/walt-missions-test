@@ -1,0 +1,808 @@
+## Implementation Plan Set
+
+These plans assume a **single offline HTML application** for the test phase. The three source files remain as JavaScript files in a known folder beside the application. Later, the application can replace the fixed-file loader with a user file-import workflow without changing the calculation engine.
+
+The test input format is currently:
+
+```javascript
+var PLATFORM_DATA = [ ... ];
+var WEAPON_DATA = [ ... ];
+var WEAPON_LETHALITY_DATA = [ ... ];
+```
+
+`PLATFORM_DATA` records include platform identity, side, group/subgroup, latitude, longitude, altitude, category, weapons, sensors, and platform type. Weapon loadouts use `{ name, quantity }`. 
+
+`WEAPON_DATA` records include `weapon_name`, `side`, `weapon_min_range`, and `weapon_max_range`. 
+
+`WEAPON_LETHALITY_DATA` records map `weapon` plus target `platformType` to a required `quantity`. 
+
+---
+
+# Phase 0 — Application Foundation, Input Contract, and Validation
+
+## Objective
+
+Create the offline application foundation, define the exact data contract, load the three fixed JavaScript data files, normalize the data, validate it, and provide reusable calculation utilities. Do not yet build mission calculations or detailed result tables.
+
+## Required directory structure
+
+Use this structure for the test phase:
+
+```text
+mission-identifier/
+├── index.html
+├── app.js
+├── styles.css
+├── platform_details.js
+├── weapon_details.js
+└── weapon_lethality_details.js
+```
+
+`index.html` must load the source files in this order:
+
+```html
+<script defer src="./platform_details.js"></script>
+<script defer src="./weapon_details.js"></script>
+<script defer src="./weapon_lethality_details.js"></script>
+<script defer src="./app.js"></script>
+```
+
+The application must access the loaded arrays through:
+
+```javascript
+window.PLATFORM_DATA
+window.WEAPON_DATA
+window.WEAPON_LETHALITY_DATA
+```
+
+Do not attempt to scan or enumerate the local directory. A browser opened from a local folder cannot reliably or safely discover arbitrary neighboring files. The test implementation should rely on the three fixed filenames above.
+
+## Data contract
+
+### 1. Platform input: `platform_details.js`
+
+Expected global variable:
+
+```javascript
+var PLATFORM_DATA = [
+  {
+    platform_name: "blue_ship_1",
+    side: "blue",
+    group: "blue_group_1",
+    subgroups: ["subgroup_1"],
+    latitude: "48.594606",
+    longitude: "-90.857965",
+    altitude: "0",
+    category: "surface",
+    weapons: [
+      { name: "BLUE_WEAPON_1", quantity: 18 }
+    ],
+    sensors: ["BLUE_SENSOR_1"],
+    type: "BLUE_DDG_1"
+  }
+];
+```
+
+### 2. Weapon input: `weapon_details.js`
+
+Expected global variable:
+
+```javascript
+var WEAPON_DATA = [
+  {
+    weapon_name: "BLUE_WEAPON_1",
+    side: "blue",
+    weapon_min_range: 0,
+    weapon_max_range: 760643
+  }
+];
+```
+
+### 3. Lethality input: `weapon_lethality_details.js`
+
+Expected global variable:
+
+```javascript
+var WEAPON_LETHALITY_DATA = [
+  {
+    weapon: "BLUE_WEAPON_1",
+    platformType: "RED_DDG_TYPE_1",
+    quantity: 2
+  }
+];
+```
+
+## Required implementation tasks
+
+1. **Build a pure data layer.**
+   - Keep calculation logic separate from DOM/UI code.
+   - Do not put core logic directly in click handlers.
+   - Use functions that accept normalized data and filter objects, then return plain result objects.
+
+2. **Normalize numeric values.**
+   - Convert `latitude`, `longitude`, and `altitude` from strings to numbers.
+   - Convert all weapon inventory and lethality `quantity` values to integers.
+   - Convert weapon min/max range values to numbers.
+   - Preserve the original source values for troubleshooting if useful.
+
+3. **Validate the input arrays before enabling calculations.**
+   - Confirm that all three globals exist and are arrays.
+   - Require unique `platform_name` values.
+   - Require unique `weapon_name` values.
+   - Require unique lethality keys: `weapon + platformType`.
+   - Reject nonnumeric or out-of-bounds latitude/longitude values.
+   - Reject negative weapon quantities.
+   - Reject lethality quantities less than one.
+   - Reject weapon records where minimum range is greater than maximum range.
+   - Warn—not necessarily fail—when:
+     - A platform carries a weapon that has no weapon definition.
+     - A platform carries a weapon with no lethality record.
+     - A lethality record references a weapon absent from the weapon definition file.
+     - A platform type has no applicable lethality records.
+
+4. **Build lookup indexes once after validation.**
+   - `platformByName`
+   - `weaponByName`
+   - `lethalityByWeaponAndTargetType`
+   - `inventoryByPlatformAndWeapon`
+   - `platformsBySide`
+   - Optional indexes for groups, subgroups, categories, types, and weapons to populate filters efficiently.
+
+5. **Implement a configuration object.**
+   Use an explicit configuration object rather than burying assumptions in calculation code:
+
+```javascript
+const SCENARIO_RULES = {
+  rangeUnit: "meters",
+  rangeModel: "great-circle",
+  defaultShooterSide: "blue",
+  defaultTargetSide: "red",
+  requireOpposingSides: true,
+  exactLethalityVolley: true,
+  hybridShooterLimit: 2,
+  hybridSameWeaponOnly: true
+};
+```
+
+6. **Implement a geospatial utility.**
+   - Use the Haversine great-circle formula.
+   - Return distance in meters.
+   - Treat the configured weapon-range values as meters for this test dataset.
+   - Do not use altitude in Phase 0–2 range calculations.
+   - Keep the distance function isolated so a future range model can replace it.
+
+7. **Create a concise data-status panel.**
+   Display:
+   - Number of platforms by side.
+   - Number of weapon definitions.
+   - Number of lethality records.
+   - Validation errors.
+   - Validation warnings.
+   - A statement of active assumptions, including the range-unit assumption.
+
+## Non-goals
+
+- No user upload controls yet.
+- No mission calculations.
+- No candidate tables.
+- No automatic weapon lethality inference.
+- No use of sensors, altitude, movement, timing, doctrine, or command-and-control constraints.
+
+## Acceptance criteria
+
+- The app opens offline with no network requests or external dependencies.
+- It identifies missing, malformed, and inconsistent records before calculations run.
+- It does not silently ignore invalid records.
+- It can be run by placing `index.html`, `app.js`, `styles.css`, and the three expected `.js` data files in one folder.
+- The core data-and-calculation functions are independent of the user interface and are covered by basic unit-style test cases.
+
+---
+
+# Phase 1 — Standard Engagement Counting and Filtering
+
+## Objective
+
+Implement fast, auditable counts of **standard engagement candidates** and aggregate counts of **pairwise same-weapon hybrid allocation patterns**. Apply filters before evaluating candidates.
+
+A standard engagement is:
+
+> One shooter platform uses one carried weapon type against one target platform, firing exactly the configured lethality-required quantity, when the target is within the configured weapon range and the shooter carries sufficient inventory.
+
+## Required engagement rules
+
+For each shooter-target-weapon combination, qualify a standard engagement only when all conditions below are true:
+
+1. Shooter and target pass the active filters.
+2. Shooter and target belong to the selected shooter and target sides.
+3. Shooter and target are different platforms.
+4. Shooter carries the weapon.
+5. The weapon has a corresponding record in `WEAPON_DATA`.
+6. A lethality record exists for:
+   ```text
+   weapon + target.type
+   ```
+7. Shooter inventory of that weapon is greater than or equal to the lethality-required quantity.
+8. Great-circle distance is within:
+   ```text
+   weapon_min_range <= distance <= weapon_max_range
+   ```
+
+For Phase 1, one qualifying shooter-target-weapon tuple equals **one standard engagement candidate**. Do not count every possible way a shooter could expend excess inventory against the same target.
+
+## Required implementation tasks
+
+### 1. Build a filter model
+
+Implement a single filter state object. At minimum, support:
+
+```javascript
+{
+  shooterSide: "blue",
+  targetSide: "red",
+  shooterPlatformNames: [],
+  targetPlatformNames: [],
+  shooterGroups: [],
+  targetGroups: [],
+  shooterSubgroups: [],
+  targetSubgroups: [],
+  shooterTypes: [],
+  targetTypes: [],
+  weaponNames: [],
+  categories: [],
+  maxDistanceMeters: null,
+  includeStandardEngagements: true,
+  includeHybridEngagements: true,
+  minimumReserveByWeapon: 0
+}
+```
+
+Use empty arrays and `null` values to mean “no restriction.”
+
+### 2. Apply filters before expensive work
+
+The calculation sequence should be:
+
+1. Filter shooters.
+2. Filter targets.
+3. For each shooter-target pair, calculate and cache range once.
+4. Evaluate only weapon records on that shooter.
+5. Perform weapon and lethality lookups using indexes.
+6. Count qualifying candidates.
+
+Do not calculate all possible candidates first and then filter them afterward.
+
+### 3. Cache pairwise distances
+
+Use a stable key:
+
+```javascript
+`${shooter.platform_name}::${target.platform_name}`
+```
+
+Cache the computed Haversine distance. Reuse it across weapon checks and hybrid checks.
+
+### 4. Support a reserve rule
+
+The initial reserve rule should be simple:
+
+```text
+available quantity = loaded quantity - configured reserve
+```
+
+A standard engagement qualifies only when:
+
+```text
+available quantity >= lethality-required quantity
+```
+
+Phase 1 does not need dynamic reserve allocation across a multi-engagement mission.
+
+### 5. Implement standard-engagement summary output
+
+Display at least:
+
+- Selected shooter count.
+- Selected target count.
+- Shooter-target pair count.
+- Number of weapon-target lethality matches.
+- Number of range-qualified combinations.
+- Number of inventory-qualified standard engagement candidates.
+- Number of target platforms with at least one qualifying standard engagement.
+- Count by weapon.
+- Count by target platform type.
+- Count by shooter group and target group, where present.
+- Input warnings that affect the count.
+
+### 6. Implement pairwise hybrid count only
+
+For this phase, calculate hybrid counts without rendering every hybrid candidate.
+
+A hybrid engagement is limited to:
+
+- Exactly two distinct shooters.
+- One target.
+- One weapon type.
+- Both shooters independently within weapon range of the target.
+- Both shooters carry the same weapon.
+- Both shooters contribute at least one round.
+- The sum of their contributions equals the required lethality quantity exactly.
+- Mixed-weapon hybrids are not allowed.
+
+For two shooter inventories `Qa`, `Qb`, and required quantity `R`, calculate allocation count using:
+
+```javascript
+const lower = Math.max(1, R - Qb);
+const upper = Math.min(Qa, R - 1);
+const allocationCount = Math.max(0, upper - lower + 1);
+```
+
+This counts valid positive integer allocations without creating a record for each allocation.
+
+### 7. Clearly label result categories
+
+The UI must distinguish:
+
+- **Standard engagement candidates**
+- **Pairwise hybrid allocation patterns**
+- **Eligible targets**
+- **Configured geometric-range results**
+
+Do not label the totals simply as “missions.”
+
+## Regression test baseline
+
+Using the supplied sample data and these assumptions:
+
+- shooter side = `blue`
+- target side = `red`
+- range values are meters
+- no reserve
+- exact lethality volley
+- standard candidates only require independent inventory sufficiency
+- hybrids are pairwise, same weapon, exact required quantity
+
+The expected baseline is:
+
+| Metric | Expected result |
+|---|---:|
+| Blue platforms | 10 |
+| Red platforms | 15 |
+| Blue-red platform pairings | 150 |
+| Standard engagement candidates | 260 |
+| Pairwise same-weapon hybrid allocation patterns | 2,287 |
+
+If the implementation produces different results, display enough intermediate summary data to identify whether the difference comes from filtering, range calculation, inventory treatment, or lethality matching.
+
+## Non-goals
+
+- Do not enumerate all possible missions.
+- Do not consume inventory globally across multiple candidates.
+- Do not claim that a sum of independent engagement candidates is an executable mission plan.
+- Do not model sensors, track quality, weather, maneuver, timing, launch constraints, or rules of engagement.
+
+---
+
+# Phase 2 — Candidate Inspection, Explanation, and Export
+
+## Objective
+
+Allow users to inspect the individual standard and hybrid engagement candidates behind the Phase 1 counts. Add traceability, detailed filters, sorting, pagination, and export.
+
+## Required implementation tasks
+
+### 1. Add a standard-engagement candidate model
+
+A standard candidate should contain:
+
+```javascript
+{
+  id: "std::blue_ship_1::red_ship_2::BLUE_WEAPON_1",
+  kind: "standard",
+  shooterPlatform: "blue_ship_1",
+  shooterSide: "blue",
+  shooterGroup: "blue_group_1",
+  targetPlatform: "red_ship_2",
+  targetSide: "red",
+  targetType: "RED_DDG_TYPE_1",
+  weapon: "BLUE_WEAPON_1",
+  distanceMeters: 0,
+  weaponMinRangeMeters: 0,
+  weaponMaxRangeMeters: 760643,
+  shooterLoadedQuantity: 18,
+  shooterReserveQuantity: 0,
+  shooterAvailableQuantity: 18,
+  requiredQuantity: 2
+}
+```
+
+Use stable IDs. Do not depend on array positions.
+
+### 2. Add a pairwise hybrid candidate model
+
+Use a canonical shooter ordering to avoid duplicate records:
+
+```javascript
+{
+  id: "hyb::blue_ship_1::blue_ship_4::red_ship_2::BLUE_WEAPON_1::5::1",
+  kind: "hybrid",
+  shooterAPlatform: "blue_ship_1",
+  shooterBPlatform: "blue_ship_4",
+  targetPlatform: "red_ship_2",
+  targetType: "RED_DDG_TYPE_3",
+  weapon: "BLUE_WEAPON_1",
+  distanceShooterAToTargetMeters: 0,
+  distanceShooterBToTargetMeters: 0,
+  shooterAAllocatedQuantity: 5,
+  shooterBAllocatedQuantity: 1,
+  shooterALoadedQuantity: 12,
+  shooterBLoadedQuantity: 8,
+  requiredQuantity: 6
+}
+```
+
+Only generate detailed hybrid records when the user requests them. Do not render thousands of DOM rows by default.
+
+### 3. Add an explanation panel
+
+When a user selects a candidate, display:
+
+- Shooter platform, type, side, group, and subgroup.
+- Target platform, type, side, group, and subgroup.
+- Weapon.
+- Calculated distance.
+- Weapon min/max range.
+- Shooter loaded inventory.
+- Reserve applied.
+- Required lethality quantity.
+- For hybrids, each shooter’s contribution and total contribution.
+- A plain-language qualification statement.
+
+Example:
+
+```text
+Qualifies because blue_ship_1 carries 18 BLUE_WEAPON_1 rounds; 2 are required
+against RED_DDG_TYPE_1; the target is 410,000 m away; and the configured weapon
+range is 0–760,643 m.
+```
+
+### 4. Add exclusion diagnostics
+
+Provide an optional “why excluded?” mode for selected shooter-target pairs. It should identify the first failed condition and, where useful, all failed conditions:
+
+- Weapon missing from weapon definition data.
+- No lethality record for weapon and target type.
+- Insufficient weapon quantity.
+- Target below minimum range.
+- Target beyond maximum range.
+- Shooter or target excluded by filter.
+- Reserve rule prevents qualification.
+
+Do not create a full exclusion table by default; it can become much larger than the qualified candidate list.
+
+### 5. Add table behavior
+
+Implement:
+
+- Pagination or virtualization.
+- Sort by shooter, target, weapon, distance, required quantity, group, or target type.
+- Text search by platform or weapon name.
+- Existing filters from Phase 1.
+- Toggle between standard and hybrid results.
+- A visible count of records matching the current view.
+
+### 6. Add offline export
+
+Support local export of filtered results:
+
+- CSV for standard and hybrid candidate tables.
+- JSON for a complete filtered-result package, including:
+  - active filters;
+  - scenario rules;
+  - summary counts;
+  - generation timestamp;
+  - candidate data.
+
+Exports must be created locally in the browser with no server interaction.
+
+### 7. Preserve Phase 1 count behavior
+
+The detailed candidate records must reconcile with the Phase 1 aggregate counts:
+
+```text
+count(standard candidate records) = standard engagement candidate count
+count(hybrid candidate records) = hybrid allocation-pattern count
+```
+
+## Non-goals
+
+- Do not treat a displayed candidate as scheduled or approved.
+- Do not automatically create multi-target missions.
+- Do not deduct inventory across separate candidate rows.
+- Do not attempt to show every possible multi-engagement combination.
+
+---
+
+# Phase 3A — User-Selected Mission Feasibility
+
+## Objective
+
+Allow the user to create a bounded, user-selected mission package by choosing individual standard or hybrid candidates. Validate whether the selected engagements can coexist under shared shooter-weapon inventory constraints.
+
+This phase answers:
+
+> “Is this user-selected set of engagements inventory-feasible?”
+
+It does **not** answer:
+
+> “How many total possible missions exist?”
+
+## Mission definition for this phase
+
+A mission package is a set of selected candidate engagements with these rules:
+
+1. Each selected item is a valid Phase 1 or Phase 2 candidate.
+2. Weapon consumption is aggregated across all selected engagements.
+3. Total weapon use by each shooter and weapon cannot exceed that shooter’s available inventory after reserve.
+4. A target may be assigned no more than one kill engagement by default.
+5. Standard and hybrid engagements may both be included.
+6. Hybrid engagements remain limited to two shooters, one target, and one weapon type.
+7. Time, movement, launch sequencing, sensor constraints, and target reactions are not modeled.
+
+## Required implementation tasks
+
+### 1. Add a mission-selection tray
+
+Allow users to add and remove candidates from a selected mission package.
+
+For each selected candidate, show:
+
+- Candidate type.
+- Shooter or shooters.
+- Target.
+- Weapon.
+- Required quantity or allocation quantities.
+- Current status: feasible, warning, or conflict.
+
+### 2. Implement inventory aggregation
+
+Aggregate usage by:
+
+```javascript
+`${platformName}::${weaponName}`
+```
+
+For each selected standard candidate:
+
+```text
+shooter consumes required quantity of weapon
+```
+
+For each selected hybrid candidate:
+
+```text
+shooter A consumes allocated quantity
+shooter B consumes allocated quantity
+```
+
+Then compare against:
+
+```text
+available quantity = loaded quantity - reserve
+```
+
+### 3. Implement mission-feasibility output
+
+Display:
+
+- Number of selected engagements.
+- Number of unique selected targets.
+- Number of standard vs. hybrid engagements.
+- Total planned expenditure by weapon.
+- Per-platform and per-weapon inventory:
+  - loaded;
+  - reserve;
+  - planned expenditure;
+  - remaining;
+  - deficit, if any.
+- Mission feasibility status.
+- Specific conflicts.
+
+Example conflict:
+
+```text
+blue_ship_1 / BLUE_WEAPON_1:
+available = 18; planned = 22; deficit = 4.
+```
+
+### 4. Prevent or flag duplicate target servicing
+
+Default behavior:
+
+- Prevent selection of a second engagement against a target already assigned to a planned kill.
+- Allow an override only if the user explicitly enables “permit duplicate target engagements.”
+- When enabled, prominently show that the mission model is no longer enforcing one planned kill per target.
+
+### 5. Add save/load of a mission package
+
+Provide local JSON export/import for the mission package.
+
+The saved package should include:
+
+```javascript
+{
+  formatVersion: 1,
+  scenarioRules: { ... },
+  filters: { ... },
+  selectedCandidateIds: [ ... ],
+  selectedCandidateSnapshots: [ ... ]
+}
+```
+
+Use candidate snapshots so the application can explain differences if source data changes later.
+
+### 6. Add scenario-change handling
+
+If source data changes after a mission package was saved:
+
+- Revalidate every selected candidate.
+- Mark candidates that no longer qualify.
+- Do not silently substitute a different weapon, shooter, target, or allocation.
+- Display a clear “scenario data changed” warning.
+
+## Non-goals
+
+- No automatic optimization.
+- No claim that a feasible inventory plan is operationally executable.
+- No computation of every mission combination.
+- No target assignment beyond the user’s selected engagements.
+
+---
+
+# Phase 3B — Bounded Optimization for Maximum Target Coverage
+
+## Objective
+
+Add an optional optimization mode that proposes **one** feasible mission package under explicit constraints. Do not attempt to count or enumerate every possible mission.
+
+## Required formal problem definition
+
+The optimization objective must be visible and configurable. The default objective should be:
+
+1. **Primary objective:** maximize the number of distinct targets assigned one qualifying engagement.
+2. **Secondary objective:** minimize total weapon expenditure.
+3. **Optional tertiary objective:** minimize number of shooters used.
+
+Use the candidate pool generated under the active filters.
+
+Constraints:
+
+1. Each target may receive at most one selected candidate.
+2. Shooter-weapon expenditure cannot exceed available inventory.
+3. Candidate eligibility must already satisfy lethality and range rules.
+4. Hybrid candidates remain pairwise, same-weapon, and exact-quantity only.
+5. No mixed-weapon hybrid engagements.
+6. No timing, sequencing, sensor, movement, or target-response constraints.
+
+## Required implementation approach
+
+1. **Do not enumerate all possible mission sets.**
+   - The candidate pool may be manageable.
+   - The combination space of candidate subsets is not.
+
+2. **Use a bounded solver approach.**
+   - The implementation may use a local/offline integer-programming solver if one is packaged with the application.
+   - If no local solver is included, implement a deterministic branch-and-bound search only for bounded problem sizes.
+   - Run the solver in a Web Worker so the UI remains responsive.
+
+3. **Set explicit computation limits.**
+   - Maximum wall-clock budget, such as five seconds.
+   - Maximum search-node budget.
+   - Cancel button.
+   - Progress indicator where practical.
+   - Return one of:
+     - `optimal`;
+     - `feasible but not proven optimal`;
+     - `no feasible solution`;
+     - `limit reached`.
+
+4. **Use safe preprocessing.**
+   - Remove candidates that are invalid under current filters.
+   - Remove duplicate candidates.
+   - For equivalent candidates against the same target, retain the lower-cost candidate when it consumes no more of every constrained resource than another candidate.
+   - Preserve an audit record explaining any candidate pruning.
+
+5. **Display optimizer results as a proposal, not a directive.**
+   Show:
+   - Objective achieved.
+   - Targets covered.
+   - Engagements selected.
+   - Inventory remaining by shooter/weapon.
+   - Search status.
+   - Runtime and any limit reached.
+   - Assumptions used.
+
+## Acceptance criteria
+
+- The optimizer never exceeds platform inventory.
+- It never assigns more than one planned kill engagement to the same target unless the user changes that policy.
+- It returns an auditable candidate list and inventory tally.
+- It does not present an incomplete or timed-out result as “optimal.”
+- It does not attempt “all possible mission” enumeration.
+
+---
+
+# Phase 4 — Future File Import and Format Migration
+
+## Objective
+
+Replace the fixed local script references with a user-controlled import workflow while preserving the same validation and calculation engine.
+
+## Required implementation tasks
+
+1. **Retain the Phase 0 data interface.**
+   - The calculation engine must receive the same normalized structures regardless of whether data came from fixed scripts or user-selected files.
+
+2. **Add user file selection.**
+   - Support selection of the three source files individually.
+   - Identify each file by expected data variable or by a user-selected role:
+     - Platform laydown;
+     - Weapon definitions;
+     - Weapon lethality.
+
+3. **Do not execute uploaded JavaScript.**
+   - The test-phase approach loads trusted local `.js` files as scripts.
+   - For user-selected files, do not use `eval`, `Function`, dynamic script injection, or similar execution mechanisms.
+   - Parse only the supported assignment format:
+     ```javascript
+     var PLATFORM_DATA = [ ... ];
+     ```
+   - Reject arbitrary JavaScript expressions, functions, imports, computed values, or executable content.
+
+4. **Plan migration to JSON.**
+   The preferred future format is:
+
+```json
+{
+  "formatVersion": 1,
+  "platforms": [ ... ],
+  "weapons": [ ... ],
+  "weaponLethality": [ ... ]
+}
+```
+
+   Support the existing `.js` format during transition, but treat JSON as the long-term interchange format.
+
+5. **Provide import validation report.**
+   Before a scenario is accepted, show:
+   - File names and detected roles.
+   - Record counts.
+   - Validation errors and warnings.
+   - Any unknown fields ignored by the current version.
+   - Required fields missing from each record type.
+
+## Non-goals
+
+- Do not rely on directory scanning.
+- Do not upload data to a server.
+- Do not execute user-provided scripts.
+- Do not silently coerce malformed data into valid-looking results.
+
+---
+
+## Cross-Phase Engineering Requirements
+
+Apply these requirements throughout implementation:
+
+- Use no external network resources, CDNs, analytics, or cloud dependencies.
+- Keep calculation logic testable and separate from display logic.
+- Keep data loading, normalization, validation, filtering, candidate generation, mission validation, and export in separate modules or clearly separated namespaces.
+- Version scenario rules and export formats.
+- Display active assumptions with every major result.
+- Treat absence of a lethality record as **not assessable / not eligible under the configured model**, not as a fabricated lethality value.
+- Make no operational, approval, or execution claims from the result counts.
+- Preserve a clear distinction among:
+  - data records;
+  - independent engagement candidates;
+  - hybrid allocation patterns;
+  - a user-selected inventory-feasible mission package;
+  - an optimizer-proposed mission package.
