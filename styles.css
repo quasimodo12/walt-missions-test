@@ -10,9 +10,27 @@ body {
 }
 
 main {
-  max-width: 60rem;
+  max-width: 100rem;
   margin: 2rem auto;
   padding: 0 1rem;
+}
+
+.workspace {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
+  gap: 1rem;
+  align-items: start;
+}
+
+.workspace > section {
+  min-width: 0;
+}
+
+@media (max-width: 60rem) {
+  .workspace {
+    grid-template-columns: minmax(0, 1fr);
+    gap: 0;
+  }
 }
 
 section {
@@ -29,27 +47,33 @@ h1, h2, h3 {
 
 dl {
   display: grid;
-  grid-template-columns: max-content 1fr;
+  grid-template-columns: minmax(0, max-content) minmax(0, 1fr);
   gap: 0.35rem 1rem;
 }
 
 dd {
   margin: 0;
+  overflow-wrap: anywhere;
 }
 
 .filter-grid {
   display: grid;
-  grid-template-columns: repeat(auto-fit, minmax(13rem, 1fr));
+  grid-template-columns: repeat(auto-fit, minmax(min(13rem, 100%), 1fr));
   gap: 1rem;
 }
 
 .filter-grid label {
   display: grid;
   gap: 0.3rem;
+  min-width: 0;
 }
 
 select, input, button {
   font: inherit;
+}
+
+.filter-grid select, .filter-grid input {
+  min-width: 0;
 }
 
 select[multiple] {
@@ -77,6 +101,10 @@ button {
 
 li {
   margin: 0.25rem 0;
+  overflow-wrap: anywhere;
+}
+
+#optimizer-filters {
   overflow-wrap: anywhere;
 }
 

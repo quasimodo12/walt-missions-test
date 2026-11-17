@@ -15,20 +15,7 @@
   <main>
     <h1>Mission Identifier</h1>
     <p>Find possible mission engagements from offline scenario data.</p>
-    <section aria-labelledby="status-heading">
-      <h2 id="status-heading">Data status</h2>
-      <p id="validation-status" role="status">Checking input data...</p>
-      <dl id="data-counts"></dl>
-      <h3>Validation errors</h3>
-      <ul id="errors"></ul>
-      <h3>Validation warnings</h3>
-      <ul id="warnings"></ul>
-    </section>
-    <section aria-labelledby="assumptions-heading">
-      <h2 id="assumptions-heading">Active assumptions</h2>
-      <ul id="assumptions"></ul>
-      <p>Inventory feasibility does not establish operational executability.</p>
-    </section>
+    <div class="workspace">
     <section aria-labelledby="filters-heading">
       <h2 id="filters-heading">Engagement filters</h2>
       <p>Apply filters before proposing a mission. Leave multi-select filters unselected for no restriction. Use Ctrl or Command to select multiple values.</p>
@@ -91,6 +78,21 @@
       <p>Only candidates qualifying under the applied filters enter the pool. Duplicates and candidates dominated on every shooter-weapon resource may be removed.</p>
       <ul id="optimizer-audit"></ul>
       <p>Assumptions: configured geometric range and exact lethality; pairwise same-weapon hybrids; no timing, sequencing, sensors, movement, or target reactions. This proposal is not an operational execution or approval.</p>
+    </section>
+    </div>
+    <section aria-labelledby="status-heading">
+      <h2 id="status-heading">Data status</h2>
+      <p id="validation-status" role="status">Checking input data...</p>
+      <dl id="data-counts"></dl>
+      <h3>Validation errors</h3>
+      <ul id="errors"></ul>
+      <h3>Validation warnings</h3>
+      <ul id="warnings"></ul>
+    </section>
+    <section aria-labelledby="assumptions-heading">
+      <h2 id="assumptions-heading">Active assumptions</h2>
+      <ul id="assumptions"></ul>
+      <p>Inventory feasibility does not establish operational executability.</p>
     </section>
     <noscript>JavaScript must be enabled to validate the scenario data.</noscript>
   </main>
