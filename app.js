@@ -259,7 +259,7 @@ function createMissionData() {
     return [kind, ...parts.map(part => encodeURIComponent(String(part)))].join("::");
   }
 
-  function summarizeEngagements(data, indexes, filters, collect = null, checkpoint = null) {
+  function validateFilters(filters) {
     if (SCENARIO_RULES.requireOpposingSides && filters.shooterSide === filters.targetSide) {
       throw new Error("Shooter and target sides must be different.");
     }
@@ -270,7 +270,10 @@ function createMissionData() {
         (!Number.isFinite(filters.maxDistanceMeters) || filters.maxDistanceMeters < 0)) {
       throw new Error("Maximum distance must be a non-negative number of meters.");
     }
+  }
 
+  function summarizeEngagements(data, indexes, filters, collect = null, checkpoint = null) {
+    validateFilters(filters);
     const shooters = (indexes.platformsBySide.get(filters.shooterSide) || []).filter(p => matchesPlatform(p, "shooter", filters));
     const targets = (indexes.platformsBySide.get(filters.targetSide) || []).filter(p => matchesPlatform(p, "target", filters));
     const summary = {
@@ -622,7 +625,7 @@ function createMissionData() {
     };
   }
 
-  return { validateAndNormalize, distanceMeters, defaultFilters, summarizeEngagements, generateCandidates, diagnosePair, filterAndSortCandidates, candidatesCsv, exportPackage, validateMissionPackage, createMissionPackage, evaluateMission };
+  return { validateAndNormalize, distanceMeters, defaultFilters, validateFilters, summarizeEngagements, generateCandidates, diagnosePair, filterAndSortCandidates, candidatesCsv, exportPackage, validateMissionPackage, createMissionPackage, evaluateMission };
 }
 const MissionData = createMissionData();
 
@@ -683,7 +686,6 @@ function initializeEngagements(result) {
   const form = document.getElementById("filters");
   if (result.errors.length) {
     form.hidden = true;
-    document.getElementById("results").hidden = true;
     document.getElementById("calculation-error").textContent = "Calculations are unavailable until input errors are fixed.";
     return;
   }
@@ -705,23 +707,6 @@ function initializeEngagements(result) {
     populateSelect(form.elements[name], values, defaults[name]);
   }
   populateSelect(form.elements.weaponNames, new Set(data.platforms.flatMap(p => p.weapons.map(w => w.name))));
-  let inspection;
-  const mission = initializeMission(data, indexes, filters => {
-    for (const name of Object.keys(controls).concat("weaponNames")) {
-      const control = form.elements[name];
-      const values = control.multiple ? filters[name] : [filters[name]];
-      for (const value of values) {
-        if (!Array.from(control.children).some(option => option.value === value)) populateSelect(control, [value]);
-      }
-      for (const option of control.children) option.selected = values.includes(option.value);
-    }
-    form.elements.maxDistanceMeters.value = filters.maxDistanceMeters === null ? "" : String(filters.maxDistanceMeters);
-    form.elements.minimumReserveByWeapon.value = String(filters.minimumReserveByWeapon);
-    form.elements.includeStandardEngagements.checked = filters.includeStandardEngagements;
-    form.elements.includeHybridEngagements.checked = filters.includeHybridEngagements;
-    form.requestSubmit();
-  }, () => inspection.refresh());
-  inspection = initializeInspection(data, indexes, mission);
   const optimizer = initializeOptimizer(data, indexes);
 
   form.addEventListener("submit", event => {
@@ -739,163 +724,17 @@ function initializeEngagements(result) {
     filters.includeStandardEngagements = form.elements.includeStandardEngagements.checked;
     filters.includeHybridEngagements = form.elements.includeHybridEngagements.checked;
     const error = document.getElementById("calculation-error");
-    let summary;
     try {
-      summary = MissionData.summarizeEngagements(data, indexes, filters);
+      MissionData.validateFilters(filters);
       error.textContent = "";
     } catch (problem) {
       error.textContent = problem.message;
-      document.getElementById("results").hidden = true;
-      document.getElementById("inspection").hidden = true;
       optimizer.invalidate("Filters are invalid; apply valid filters before optimizing.");
       return;
     }
-    renderSummary(summary, filters);
-    inspection.setResults(filters, summary);
-    mission.setFilters(filters);
     optimizer.setFilters(filters);
   });
   form.requestSubmit();
-}
-
-function initializeInspection(data, indexes, mission) {
-  const element = id => document.getElementById(id);
-  const names = new Set(data.platforms.map(platform => platform.platform_name));
-  populateSelect(element("diagnostic-shooter"), names);
-  populateSelect(element("diagnostic-target"), names);
-  populateSelect(element("diagnostic-weapon"), new Set([
-    ...data.weapons.map(weapon => weapon.weapon_name),
-    ...data.platforms.flatMap(platform => platform.weapons.map(weapon => weapon.name))
-  ]));
-  const state = { filters: null, summary: null, cache: {}, page: 0 };
-  const pageSize = 25;
-
-  function candidates(kind) {
-    if (!state.cache[kind]) state.cache[kind] = MissionData.generateCandidates(data, indexes, state.filters, kind);
-    return state.cache[kind];
-  }
-  function currentView(kind) {
-    return MissionData.filterAndSortCandidates(candidates(kind), element("candidate-search").value, element("candidate-sort").value);
-  }
-  function showError(error) {
-    element("inspection-error").textContent = error.message;
-  }
-  function render() {
-    const kind = element("candidate-kind").value;
-    const rows = element("candidate-rows");
-    rows.replaceChildren();
-    element("candidate-explanation").textContent = "Select a candidate to inspect it.";
-    if (!state.cache[kind]) {
-      element("candidate-count").textContent = "Candidate details not loaded.";
-      element("candidate-page").textContent = "";
-      element("previous-page").disabled = true;
-      element("next-page").disabled = true;
-      return;
-    }
-    const view = currentView(kind);
-    const pages = Math.max(1, Math.ceil(view.length / pageSize));
-    state.page = Math.min(state.page, pages - 1);
-    element("candidate-count").textContent = `${view.length} matching ${kind} records.`;
-    element("candidate-page").textContent = `Page ${state.page + 1} of ${pages}`;
-    element("previous-page").disabled = state.page === 0;
-    element("next-page").disabled = state.page >= pages - 1;
-    for (const candidate of view.slice(state.page * pageSize, (state.page + 1) * pageSize)) {
-      const row = document.createElement("tr");
-      const shooter = candidate.kind === "standard" ? candidate.shooterPlatform : `${candidate.shooterAPlatform} + ${candidate.shooterBPlatform}`;
-      const distance = candidate.kind === "standard" ? candidate.distanceMeters.toFixed(1) :
-        `${candidate.distanceShooterAToTargetMeters.toFixed(1)} / ${candidate.distanceShooterBToTargetMeters.toFixed(1)}`;
-      const allocation = candidate.kind === "standard" ? String(candidate.requiredQuantity) :
-        `${candidate.shooterAAllocatedQuantity} + ${candidate.shooterBAllocatedQuantity}`;
-      for (const value of [shooter, candidate.targetPlatform, candidate.weapon, distance, candidate.requiredQuantity, allocation]) {
-        const cell = document.createElement("td");
-        cell.textContent = String(value);
-        row.append(cell);
-      }
-      const cell = document.createElement("td");
-      const button = document.createElement("button");
-      button.type = "button";
-      button.textContent = "Explain";
-      button.addEventListener("click", () => explain(candidate));
-      cell.append(button);
-      const add = document.createElement("button");
-      add.type = "button";
-      add.textContent = mission.has(candidate.id) ? "Selected" : "Add to mission";
-      add.disabled = mission.has(candidate.id);
-      add.addEventListener("click", () => mission.add(candidate));
-      cell.append(add);
-      row.append(cell);
-      rows.append(row);
-    }
-  }
-  function explain(candidate) {
-    const describe = name => {
-      const p = indexes.platformByName.get(name);
-      return `${p.platform_name}: type ${p.type}, side ${p.side}, group ${p.group}, subgroups ${p.subgroups.join(", ") || "none"}`;
-    };
-    const target = describe(candidate.targetPlatform);
-    const range = `Weapon ${candidate.weapon}; configured range ${candidate.weaponMinRangeMeters}–${candidate.weaponMaxRangeMeters} m; required quantity ${candidate.requiredQuantity}.`;
-    let text;
-    if (candidate.kind === "standard") {
-      text = `${describe(candidate.shooterPlatform)}\nTarget ${target}\n${range}\nDistance ${candidate.distanceMeters.toFixed(1)} m; loaded ${candidate.shooterLoadedQuantity}; reserve ${candidate.shooterReserveQuantity}; available ${candidate.shooterAvailableQuantity}.\nQualifies because the target is within configured range and available inventory meets the required quantity.`;
-    } else {
-      text = `${describe(candidate.shooterAPlatform)}\n${describe(candidate.shooterBPlatform)}\nTarget ${target}\n${range}\nShooter A: distance ${candidate.distanceShooterAToTargetMeters.toFixed(1)} m, loaded ${candidate.shooterALoadedQuantity}, reserve ${candidate.shooterAReserveQuantity}, available ${candidate.shooterAAvailableQuantity}, contributes ${candidate.shooterAAllocatedQuantity}.\nShooter B: distance ${candidate.distanceShooterBToTargetMeters.toFixed(1)} m, loaded ${candidate.shooterBLoadedQuantity}, reserve ${candidate.shooterBReserveQuantity}, available ${candidate.shooterBAvailableQuantity}, contributes ${candidate.shooterBAllocatedQuantity}.\nQualifies because both shooters are within range and contribute ${candidate.shooterAAllocatedQuantity + candidate.shooterBAllocatedQuantity} rounds in total, exactly the required quantity.`;
-    }
-    element("candidate-explanation").textContent = text;
-  }
-  function action(callback) {
-    try {
-      element("inspection-error").textContent = "";
-      callback();
-    } catch (error) {
-      showError(error);
-    }
-  }
-  element("load-candidates").addEventListener("click", () => action(() => {
-    candidates(element("candidate-kind").value);
-    state.page = 0;
-    render();
-  }));
-  for (const id of ["candidate-kind", "candidate-sort", "candidate-search"]) {
-    element(id).addEventListener(id === "candidate-search" ? "input" : "change", () => {
-      state.page = 0;
-      render();
-    });
-  }
-  element("previous-page").addEventListener("click", () => { state.page--; render(); });
-  element("next-page").addEventListener("click", () => { state.page++; render(); });
-  element("export-csv").addEventListener("click", () => action(() => {
-    const kind = element("candidate-kind").value;
-    downloadFile(`${kind}-candidates.csv`, MissionData.candidatesCsv(currentView(kind), kind), "text/csv;charset=utf-8");
-    render();
-  }));
-  element("export-json").addEventListener("click", () => action(() => {
-    const view = { search: element("candidate-search").value, sort: element("candidate-sort").value };
-    const packageData = MissionData.exportPackage(state.filters, state.summary, {
-      standard: currentView("standard"), hybrid: currentView("hybrid")
-    }, view);
-    downloadFile("filtered-engagements.json", JSON.stringify(packageData, null, 2), "application/json");
-    render();
-  }));
-  element("diagnose").addEventListener("click", () => action(() => {
-    const diagnostic = MissionData.diagnosePair(indexes, state.filters,
-      element("diagnostic-shooter").value, element("diagnostic-target").value, element("diagnostic-weapon").value);
-    element("diagnostic-result").textContent = `Distance: ${diagnostic.distanceMeters.toFixed(1)} m. ` +
-      (diagnostic.failures.length ? `First failure: ${diagnostic.failures[0]} All failures: ${diagnostic.failures.join(" ")}` :
-        "Qualifies as a standard candidate, provided standard engagements are included.");
-  }));
-  return {
-    refresh: render,
-    setResults(filters, summary) {
-      state.filters = filters;
-      state.summary = summary;
-      state.cache = {};
-      state.page = 0;
-      element("inspection").hidden = false;
-      element("inspection-error").textContent = "";
-      element("diagnostic-result").textContent = "";
-      render();
-    }
-  };
 }
 
 function downloadFile(name, content, type) {
@@ -938,6 +777,20 @@ function initializeOptimizer(data, indexes) {
     }
     parent.append(row);
   }
+  function renderProposalRows() {
+    const rows = element("optimizer-rows");
+    rows.replaceChildren();
+    if (!proposal) return;
+    const candidates = MissionData.filterAndSortCandidates(
+      proposal.selectedCandidateSnapshots, "", element("optimizer-sort").value);
+    const shooter = candidate => candidate.kind === "standard"
+      ? candidate.shooterPlatform : `${candidate.shooterAPlatform} + ${candidate.shooterBPlatform}`;
+    for (const candidate of candidates) {
+      const allocation = candidate.kind === "standard" ? candidate.requiredQuantity : `${candidate.shooterAAllocatedQuantity} + ${candidate.shooterBAllocatedQuantity}`;
+      addRow(rows, [candidate.id, candidate.kind, shooter(candidate), candidate.targetPlatform, candidate.weapon, allocation]);
+    }
+  }
+  element("optimizer-sort").addEventListener("change", renderProposalRows);
   function finish(result) {
     stopWorker();
     clearResult();
@@ -978,11 +831,7 @@ function initializeOptimizer(data, indexes) {
     if (!assessment.feasible) throw new Error(`Proposal failed mission validation: ${assessment.conflicts.join(" ")}`);
     proposal = candidatePackage;
     element("optimize-save").disabled = false;
-    for (const candidate of result.selected) {
-      const shooters = candidate.kind === "standard" ? candidate.shooterPlatform : `${candidate.shooterAPlatform} + ${candidate.shooterBPlatform}`;
-      const allocation = candidate.kind === "standard" ? candidate.requiredQuantity : `${candidate.shooterAAllocatedQuantity} + ${candidate.shooterBAllocatedQuantity}`;
-      addRow(element("optimizer-rows"), [candidate.id, candidate.kind, shooters, candidate.targetPlatform, candidate.weapon, allocation]);
-    }
+    renderProposalRows();
     for (const item of assessment.inventory) {
       addRow(element("optimizer-inventory"), [item.platform, item.weapon, item.loaded, item.reserve, item.planned, item.remaining, item.deficit]);
     }
@@ -1063,135 +912,6 @@ function initializeOptimizer(data, indexes) {
   };
 }
 
-function initializeMission(data, indexes, applyFilters, refreshCandidates) {
-  const element = id => document.getElementById(id);
-  let packageData = null;
-  const row = (parent, values) => {
-    const tr = document.createElement("tr");
-    for (const value of values) {
-      const td = document.createElement("td");
-      td.textContent = String(value);
-      tr.append(td);
-    }
-    parent.append(tr);
-    return tr;
-  };
-  const list = (id, values) => {
-    const parent = element(id);
-    parent.replaceChildren();
-    for (const value of values.length ? values : ["None."]) {
-      const item = document.createElement("li");
-      item.textContent = value;
-      parent.append(item);
-    }
-  };
-  function render() {
-    if (!packageData) return;
-    const result = MissionData.evaluateMission(data, indexes, packageData);
-    element("mission").hidden = false;
-    element("permit-duplicates").checked = packageData.permitDuplicateTargets;
-    element("duplicate-warning").textContent = packageData.permitDuplicateTargets
-      ? "Warning: one planned kill per target is NOT enforced." : "";
-    element("scenario-warning").textContent = result.scenarioChanged
-      ? "Scenario data or rules changed, or saved scenario provenance is unavailable. Selections were revalidated; saved allocations were not replaced." : "";
-    element("mission-status").textContent = result.feasible
-      ? "Inventory-feasible; operational execution is not assessed." : "Mission has conflicts and is not feasible under this model.";
-    element("mission-status").className = result.feasible ? "valid" : "invalid";
-    const summary = element("mission-summary");
-    summary.replaceChildren();
-    for (const [label, value] of [["Selected engagements", result.selectedCount], ["Unique targets", result.targetCount],
-      ["Standard engagements", result.standardCount], ["Hybrid engagements", result.hybridCount]]) {
-      const term = document.createElement("dt"), description = document.createElement("dd");
-      term.textContent = label;
-      description.textContent = String(value);
-      summary.append(term, description);
-    }
-    const rows = element("mission-rows");
-    rows.replaceChildren();
-    for (const entry of result.results) {
-      const candidate = entry.candidate;
-      const shooter = candidate.kind === "standard" ? candidate.shooterPlatform : `${candidate.shooterAPlatform} + ${candidate.shooterBPlatform}`;
-      const allocation = candidate.kind === "standard" ? candidate.requiredQuantity : `${candidate.shooterAAllocatedQuantity} + ${candidate.shooterBAllocatedQuantity}`;
-      const tr = row(rows, [candidate.kind, shooter, candidate.targetPlatform, candidate.weapon, allocation, entry.status]);
-      const cell = document.createElement("td"), button = document.createElement("button");
-      button.type = "button";
-      button.textContent = "Remove";
-      button.addEventListener("click", () => {
-        packageData.selectedCandidateSnapshots = packageData.selectedCandidateSnapshots.filter(c => c.id !== candidate.id);
-        packageData.selectedCandidateIds = packageData.selectedCandidateSnapshots.map(c => c.id);
-        element("mission-error").textContent = "";
-        render();
-        refreshCandidates();
-      });
-      cell.append(button);
-      tr.append(cell);
-    }
-    list("mission-expenditure", [...result.expenditures].map(([weapon, quantity]) => `${weapon}: ${quantity}`));
-    const inventory = element("mission-inventory");
-    inventory.replaceChildren();
-    for (const item of result.inventory) row(inventory, [item.platform, item.weapon, item.loaded, item.reserve,
-      item.available, item.planned, item.remaining, item.deficit]);
-    list("mission-conflicts", result.conflicts);
-    list("mission-differences", result.results.flatMap(entry =>
-      entry.differences.map(difference => `${entry.candidate.id}: ${difference}`)));
-  }
-  function action(callback) {
-    try {
-      element("mission-error").textContent = "";
-      callback();
-    } catch (error) {
-      element("mission-error").textContent = error.message;
-    }
-  }
-  element("permit-duplicates").addEventListener("change", () => action(() => {
-    packageData.permitDuplicateTargets = element("permit-duplicates").checked;
-    render();
-  }));
-  element("save-mission").addEventListener("click", () => action(() => {
-    downloadFile("mission-package.json", JSON.stringify(packageData, null, 2), "application/json");
-  }));
-  element("load-mission").addEventListener("change", async event => {
-    const file = event.target.files[0];
-    if (!file) return;
-    try {
-      const loaded = MissionData.validateMissionPackage(JSON.parse(await file.text()));
-      MissionData.summarizeEngagements(data, indexes, loaded.filters);
-      MissionData.evaluateMission(data, indexes, loaded);
-      packageData = loaded;
-      element("mission-error").textContent = "";
-      applyFilters(loaded.filters);
-      render();
-      refreshCandidates();
-    } catch (error) {
-      element("mission-error").textContent = `Unable to load mission: ${error.message}`;
-    } finally {
-      event.target.value = "";
-    }
-  });
-  return {
-    has: id => !!packageData && packageData.selectedCandidateIds.includes(id),
-    add(candidate) {
-      action(() => {
-        if (packageData.selectedCandidateIds.includes(candidate.id)) throw new Error("Candidate is already selected.");
-        if (!packageData.permitDuplicateTargets && packageData.selectedCandidateSnapshots.some(c => c.targetPlatform === candidate.targetPlatform)) {
-          throw new Error(`Target ${candidate.targetPlatform} already has a planned engagement.`);
-        }
-        const updated = { ...packageData, selectedCandidateIds: [...packageData.selectedCandidateIds, candidate.id],
-          selectedCandidateSnapshots: [...packageData.selectedCandidateSnapshots, candidate] };
-        MissionData.evaluateMission(data, indexes, updated);
-        packageData = updated;
-        render();
-        refreshCandidates();
-      });
-    },
-    setFilters(filters) {
-      if (!packageData) packageData = MissionData.createMissionPackage(data, filters, [], false);
-      else packageData.filters = filters;
-      render();
-    }
-  };
-}
-
 function populateSelect(select, values, selected) {
   for (const value of [...values].sort()) {
     const option = document.createElement("option");
@@ -1199,49 +919,6 @@ function populateSelect(select, values, selected) {
     option.textContent = value;
     option.selected = value === selected;
     select.append(option);
-  }
-}
-
-function renderSummary(summary, filters) {
-  const results = document.getElementById("results");
-  results.hidden = false;
-  const counts = document.getElementById("summary-counts");
-  counts.replaceChildren();
-  const countRows = [
-    ["Selected shooters", summary.shooterCount],
-    ["Selected targets", summary.targetCount],
-    ["Shooter-target pairs", summary.pairCount],
-    ["Pairs within maximum distance filter", summary.distanceQualifiedPairs],
-    ["Weapon-target lethality matches", summary.lethalityMatches],
-    ["Configured geometric-range qualified combinations", summary.rangeQualified],
-    ["Standard engagement candidates", filters.includeStandardEngagements ? summary.standardCandidates : "Not included"],
-    ["Eligible targets (at least one standard candidate)", filters.includeStandardEngagements ? summary.eligibleTargets : "Not included"],
-    ["Pairwise hybrid allocation patterns", filters.includeHybridEngagements ? summary.hybridPatterns : "Not included"]
-  ];
-  for (const [label, value] of countRows) {
-    const term = document.createElement("dt");
-    const description = document.createElement("dd");
-    term.textContent = label;
-    description.textContent = String(value);
-    counts.append(term, description);
-  }
-  for (const [id, map] of [
-    ["by-weapon", summary.byWeapon], ["by-target-type", summary.byTargetType],
-    ["by-shooter-group", summary.byShooterGroup], ["by-target-group", summary.byTargetGroup]
-  ]) {
-    const list = document.getElementById(id);
-    list.replaceChildren();
-    if (!filters.includeStandardEngagements || !map.size) {
-      const item = document.createElement("li");
-      item.textContent = filters.includeStandardEngagements ? "None." : "Standard candidates not included.";
-      list.append(item);
-    } else {
-      for (const [name, count] of [...map].sort(([a], [b]) => a.localeCompare(b))) {
-        const item = document.createElement("li");
-        item.textContent = `${name}: ${count}`;
-        list.append(item);
-      }
-    }
   }
 }
 

@@ -75,10 +75,6 @@ button {
   cursor: pointer;
 }
 
-#candidate-explanation {
-  white-space: pre-line;
-}
-
 li {
   margin: 0.25rem 0;
   overflow-wrap: anywhere;

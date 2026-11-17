@@ -1,0 +1,18 @@
+Application purpose
+===================
+
+The practical purpose of this tool is mission proposal: help users find
+possible mission engagements in a large video game scenario, where they may
+not know all the actions available to them. Users should be able to filter
+and sort relevant actions.
+
+Standard and hybrid engagement possibilities remain available to the
+application's backend, but listing every possible engagement is not itself
+the user-facing goal. Keep the interface focused on scenario validation,
+filters, and optimizer proposals.
+
+Optimizer proposals are inventory-feasible under the configured model, not
+proof that a mission is operationally executable.
+
+The previous implementation plan is archived in archive/ImplementationPlan.txt
+for historical context; it does not override this direction.

@@ -535,11 +535,15 @@ test("rejects invalid filter values and same-side selection", () => {
   assert.throws(() => summarizeEngagements(result.data, result.indexes, filters), /distance/);
 });
 
-test("offline page loads fixed scripts, inspects, exports and handles missing inputs", async () => {
+test("offline page validates data and proposes sortable missions without obsolete views", async () => {
   const html = fs.readFileSync("index.html", "utf8");
   const scripts = [...html.matchAll(/<script defer src="\.\/([^"]+)"><\/script>/g)].map(match => match[1]);
   assert.deepEqual(scripts, ["platform_details.js", "weapon_details.js", "weapon_lethality_details.js", "optimizer.js", "app.js"]);
   assert.doesNotMatch(html, /(?:https?:)?\/\//);
+  for (const id of ["results", "inspection", "mission"]) {
+    assert.doesNotMatch(html, new RegExp(`id="${id}"`));
+  }
+  const pageIds = new Set([...html.matchAll(/\bid="([^"]+)"/g)].map(match => match[1]));
 
   function runPage(sourceFiles) {
     const elements = new Map();
@@ -583,11 +587,10 @@ test("offline page loads fixed scripts, inspects, exports and handles missing in
     const document = {
       getElementById(id) {
         if (id === "filters") return form;
+        if (!pageIds.has(id)) return null;
         if (!elements.has(id)) {
           const item = element();
-          if (id === "candidate-kind") item.value = "standard";
-          if (id === "candidate-sort") item.value = "shooter";
-          if (id === "candidate-search") item.value = "";
+          if (id === "optimizer-sort") item.value = "target";
           elements.set(id, item);
         }
         return elements.get(id);
@@ -619,52 +622,9 @@ test("offline page loads fixed scripts, inspects, exports and handles missing in
   const loaded = runPage(scripts);
   assert.equal(loaded.elements.get("validation-status").textContent, "Data validated successfully.");
   assert.ok(loaded.elements.get("warnings").children.some(item => item.textContent.includes("no lethality")));
-  assert.ok(loaded.elements.get("summary-counts").children.some(item => item.textContent === "2287"));
-  assert.equal(loaded.elements.get("candidate-rows").children.length, 0);
-  loaded.elements.get("load-candidates").click();
-  assert.equal(loaded.elements.get("candidate-rows").children.length, 25);
-  assert.match(loaded.elements.get("candidate-count").textContent, /260 matching/);
-  loaded.elements.get("next-page").click();
-  assert.equal(loaded.elements.get("candidate-page").textContent, "Page 2 of 11");
-  loaded.elements.get("candidate-rows").children[0].children[6].children[0].click();
-  assert.match(loaded.elements.get("candidate-explanation").textContent, /Qualifies because/);
-  loaded.elements.get("candidate-rows").children[0].children[6].children[1].click();
-  assert.equal(loaded.elements.get("mission-rows").children.length, 1);
-  assert.match(loaded.elements.get("mission-status").textContent, /Inventory-feasible/);
-  loaded.elements.get("save-mission").click();
-  const savedMission = JSON.parse(await loaded.downloads[0].blob.text());
-  assert.equal(savedMission.selectedCandidateIds.length, 1);
-  const firstTarget = loaded.elements.get("mission-rows").children[0].children[2].textContent;
-  const duplicate = loaded.elements.get("candidate-rows").children.find(row =>
-    row.children[1].textContent === firstTarget && !row.children[6].children[1].disabled);
-  assert.ok(duplicate);
-  duplicate.children[6].children[1].click();
-  assert.match(loaded.elements.get("mission-error").textContent, /already has a planned engagement/);
-  loaded.elements.get("permit-duplicates").checked = true;
-  loaded.elements.get("permit-duplicates").events.change();
-  duplicate.children[6].children[1].click();
-  assert.equal(loaded.elements.get("mission-rows").children.length, 2);
-  assert.match(loaded.elements.get("duplicate-warning").textContent, /NOT enforced/);
-  loaded.elements.get("permit-duplicates").checked = false;
-  loaded.elements.get("permit-duplicates").events.change();
-  assert.match(loaded.elements.get("mission-conflicts").children.map(item => item.textContent).join(" "), /only one is permitted/);
-  loaded.elements.get("mission-rows").children[1].children[6].children[0].click();
-  await loaded.elements.get("load-mission").events.change({ target: {
-    files: [{ text: async () => JSON.stringify(savedMission) }], value: "mission.json"
-  } });
-  assert.equal(loaded.elements.get("mission-rows").children.length, 1);
-  assert.equal(loaded.elements.get("permit-duplicates").checked, false);
-  await loaded.elements.get("load-mission").events.change({ target: {
-    files: [{ text: async () => "{broken" }], value: "bad.json"
-  } });
-  assert.match(loaded.elements.get("mission-error").textContent, /Unable to load mission/);
-  assert.equal(loaded.elements.get("mission-rows").children.length, 1);
   const shooterOption = loaded.form.elements.shooterPlatformNames.children.find(option => option.value === "blue_ship_1");
-  const targetOption = loaded.form.elements.targetPlatformNames.children.find(option => option.value === "red_ship_1");
   shooterOption.selected = true;
-  targetOption.selected = true;
   loaded.form.requestSubmit();
-  loaded.elements.get("optimize-expenditure").checked = true;
   loaded.elements.get("optimize-start").click();
   const worker = loaded.workers[0];
   const workerMessages = [];
@@ -675,9 +635,8 @@ test("offline page loads fixed scripts, inspects, exports and handles missing in
   vm.runInContext(workerSource, workerContext);
   workerContext.self.onmessage({ data: worker.message });
   assert.match(loaded.elements.get("optimizer-status").textContent, /optimal/);
-  assert.ok(loaded.elements.get("optimizer-rows").children.length > 0);
+  assert.ok(loaded.elements.get("optimizer-rows").children.length > 1);
   assert.ok(loaded.elements.get("optimizer-inventory").children.length > 0);
-  assert.equal(loaded.elements.get("mission-rows").children.length, 1);
   assert.equal(worker.terminated, true);
   const optimal = workerMessages.find(message => message.type === "result").result;
   const thread = new ThreadWorker(
@@ -701,9 +660,23 @@ test("offline page loads fixed scripts, inspects, exports and handles missing in
   } finally {
     await thread.terminate();
   }
-    loaded.elements.get("optimize-save").click();
-    const savedProposal = JSON.parse(await loaded.downloads[1].blob.text());
-    assert.deepEqual(savedProposal.selectedCandidateIds, Array.from(optimal.selected, candidate => candidate.id));
+  for (const [sort, column] of [["target", 3], ["weapon", 4], ["shooter", 2]]) {
+    loaded.elements.get("optimizer-sort").value = sort;
+    loaded.elements.get("optimizer-sort").events.change();
+    const values = loaded.elements.get("optimizer-rows").children.map(row => row.children[column].textContent);
+    assert.deepEqual(values, values.slice().sort((a, b) => a.localeCompare(b)));
+  }
+  loaded.elements.get("optimizer-sort").value = "required";
+  loaded.elements.get("optimizer-sort").events.change();
+  const quantities = loaded.elements.get("optimizer-rows").children.map(row => {
+    const allocation = row.children[5].textContent.split(" + ").map(Number);
+    return allocation.reduce((sum, quantity) => sum + quantity, 0);
+  });
+  assert.ok(new Set(quantities).size > 1);
+  assert.deepEqual(quantities, quantities.slice().sort((a, b) => a - b));
+  loaded.elements.get("optimize-save").click();
+  const savedProposal = JSON.parse(await loaded.downloads[0].blob.text());
+  assert.deepEqual(savedProposal.selectedCandidateIds, Array.from(optimal.selected, candidate => candidate.id));
   loaded.elements.get("optimize-start").click();
   const cancelled = loaded.workers[1];
   cancelled.onmessage({ data: { type: "progress", update: { ...optimal, phase: "Searching" } } });
@@ -713,44 +686,15 @@ test("offline page loads fixed scripts, inspects, exports and handles missing in
   loaded.elements.get("optimize-start").click();
   loaded.workers[2].onerror({ message: "worker unavailable" });
   assert.match(loaded.elements.get("optimizer-error").textContent, /worker unavailable/);
-  shooterOption.selected = false;
-  targetOption.selected = false;
-  loaded.form.requestSubmit();
-  assert.equal(loaded.elements.get("optimizer-rows").children.length, 0);
-  loaded.elements.get("candidate-kind").value = "hybrid";
-  loaded.elements.get("candidate-kind").events.change();
-  assert.equal(loaded.elements.get("candidate-rows").children.length, 0);
-  loaded.elements.get("load-candidates").click();
-  assert.match(loaded.elements.get("candidate-count").textContent, /2287 matching/);
-  assert.equal(loaded.elements.get("candidate-rows").children.length, 25);
-  loaded.elements.get("export-csv").click();
-  loaded.elements.get("export-json").click();
-  assert.deepEqual(loaded.downloads.map(download => download.name), ["mission-package.json", "optimizer-proposal.json", "hybrid-candidates.csv", "filtered-engagements.json"]);
-  const csv = await loaded.downloads[2].blob.text();
-  assert.equal(csv.split("\r\n").length, 2288);
-  const exported = JSON.parse(await loaded.downloads[3].blob.text());
-  assert.equal(exported.candidates.standard.length, 260);
-  assert.equal(exported.candidates.hybrid.length, 2287);
-  assert.equal(exported.summary.standardCandidates, 260);
-  loaded.elements.get("candidate-search").value = "not-a-platform-or-weapon";
-  loaded.elements.get("candidate-search").events.input();
-  assert.match(loaded.elements.get("candidate-count").textContent, /0 matching/);
-  loaded.elements.get("export-json").click();
-  const searched = JSON.parse(await loaded.downloads[4].blob.text());
-  assert.deepEqual(searched.candidates, { standard: [], hybrid: [] });
-  assert.equal(searched.summary.standardCandidates, 260);
-  loaded.elements.get("diagnostic-shooter").value = "blue_ship_1";
-  loaded.elements.get("diagnostic-target").value = "red_ship_1";
-  loaded.elements.get("diagnostic-weapon").value = "BLUE_WEAPON_5";
-  loaded.elements.get("diagnose").click();
-  assert.match(loaded.elements.get("diagnostic-result").textContent, /No lethality record/);
-  loaded.form.elements.shooterPlatformNames.children.find(option => option.value === "blue_ship_1").selected = true;
-  loaded.form.requestSubmit();
-  assert.equal(loaded.elements.get("summary-counts").children[1].textContent, "1");
   loaded.form.elements.targetSide.value = "blue";
   loaded.form.requestSubmit();
   assert.match(loaded.elements.get("calculation-error").textContent, /different/);
-  assert.equal(loaded.elements.get("results").hidden, true);
+  assert.equal(loaded.elements.get("optimize-start").disabled, true);
+  assert.equal(loaded.elements.get("optimizer-rows").children.length, 0);
+  loaded.form.elements.targetSide.value = "red";
+  loaded.form.requestSubmit();
+  assert.equal(loaded.elements.get("calculation-error").textContent, "");
+  assert.equal(loaded.elements.get("optimize-start").disabled, false);
   const missing = runPage(["app.js"]);
   assert.match(missing.elements.get("validation-status").textContent, /invalid/i);
   assert.equal(missing.elements.get("errors").children.length, 3);

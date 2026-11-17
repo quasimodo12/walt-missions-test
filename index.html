@@ -14,7 +14,7 @@
 <body>
   <main>
     <h1>Mission Identifier</h1>
-    <p>Offline scenario data and engagement counts</p>
+    <p>Find possible mission engagements from offline scenario data.</p>
     <section aria-labelledby="status-heading">
       <h2 id="status-heading">Data status</h2>
       <p id="validation-status" role="status">Checking input data...</p>
@@ -27,11 +27,11 @@
     <section aria-labelledby="assumptions-heading">
       <h2 id="assumptions-heading">Active assumptions</h2>
       <ul id="assumptions"></ul>
-      <p>Candidate counts are independent; inventory is aggregated only in the mission-selection tray. Feasibility does not establish operational executability.</p>
+      <p>Inventory feasibility does not establish operational executability.</p>
     </section>
     <section aria-labelledby="filters-heading">
       <h2 id="filters-heading">Engagement filters</h2>
-      <p>Leave multi-select filters unselected for no restriction. Use Ctrl or Command to select multiple values.</p>
+      <p>Apply filters before proposing a mission. Leave multi-select filters unselected for no restriction. Use Ctrl or Command to select multiple values.</p>
       <p>Apply a reserve separately to each shooter's inventory of each weapon. Hybrid patterns use two distinct shooters with the same weapon and an exact, positive split of the required quantity.</p>
       <form id="filters">
         <div class="filter-grid">
@@ -52,96 +52,14 @@
         </div>
         <p><label><input name="includeStandardEngagements" type="checkbox" checked> Include standard engagement candidates</label></p>
         <p><label><input name="includeHybridEngagements" type="checkbox" checked> Include pairwise hybrid allocation patterns</label></p>
-        <button type="submit">Calculate counts</button>
+        <button type="submit">Apply filters</button>
       </form>
       <p id="calculation-error" class="invalid" role="alert"></p>
     </section>
-    <section id="results" aria-labelledby="results-heading" hidden>
-      <h2 id="results-heading">Configured geometric-range results</h2>
-      <p>Lethality matches and range-qualified combinations are counted after platform, weapon, and maximum-distance filters, before the inventory reserve test. Data warnings above may affect these counts.</p>
-      <dl id="summary-counts"></dl>
-      <h3>Standard candidates by weapon</h3>
-      <ul id="by-weapon"></ul>
-      <h3>Standard candidates by target type</h3>
-      <ul id="by-target-type"></ul>
-      <h3>Standard candidates by shooter group</h3>
-      <ul id="by-shooter-group"></ul>
-      <h3>Standard candidates by target group</h3>
-      <ul id="by-target-group"></ul>
-    </section>
-    <section id="inspection" aria-labelledby="inspection-heading" hidden>
-      <h2 id="inspection-heading">Candidate inspection</h2>
-      <p>Inspecting or exporting candidates does not schedule or approve them. Apply changed filters with “Calculate counts” first.</p>
-      <p>CSV exports the current candidate type and search across all pages. JSON exports both enabled types with the current search; its summary reflects the applied scenario filters before search. Hybrid distance sorting uses the longer shooter-to-target distance.</p>
-      <div class="filter-grid">
-        <label>Candidate type
-          <select id="candidate-kind"><option value="standard">Standard</option><option value="hybrid">Pairwise hybrid</option></select>
-        </label>
-        <label>Search platform or weapon <input id="candidate-search" type="search"></label>
-        <label>Sort by
-          <select id="candidate-sort">
-            <option value="shooter">Shooter</option><option value="target">Target</option>
-            <option value="weapon">Weapon</option><option value="distance">Distance</option>
-            <option value="required">Required quantity</option><option value="group">Shooter group</option>
-            <option value="type">Target type</option>
-          </select>
-        </label>
-      </div>
-      <p><button id="load-candidates" type="button">Load candidate details</button>
-        <button id="export-csv" type="button">Export current view CSV</button>
-        <button id="export-json" type="button">Export filtered results JSON</button></p>
-      <p id="inspection-error" class="invalid" role="alert"></p>
-      <p id="candidate-count" role="status">Candidate details not loaded.</p>
-      <div class="table-scroll">
-        <table>
-          <thead><tr><th>Shooter(s)</th><th>Target</th><th>Weapon</th><th>Distance (m)</th><th>Required</th><th>Allocation</th><th>Details / mission</th></tr></thead>
-          <tbody id="candidate-rows"></tbody>
-        </table>
-      </div>
-      <p><button id="previous-page" type="button">Previous</button> <span id="candidate-page"></span> <button id="next-page" type="button">Next</button></p>
-      <h3>Candidate explanation</h3>
-      <div id="candidate-explanation">Select a candidate to inspect it.</div>
-      <h3>Why excluded? (standard engagement)</h3>
-      <div class="filter-grid">
-        <label>Shooter <select id="diagnostic-shooter"></select></label>
-        <label>Target <select id="diagnostic-target"></select></label>
-        <label>Weapon <select id="diagnostic-weapon"></select></label>
-      </div>
-      <p><button id="diagnose" type="button">Explain pair</button></p>
-      <div id="diagnostic-result" role="status"></div>
-    </section>
-    <section id="mission" aria-labelledby="mission-heading" hidden>
-      <h2 id="mission-heading">Selected mission package</h2>
-      <p>Inventory feasibility only: time, movement, launch sequencing, sensors, and target reactions are not modeled.</p>
-      <p><label><input id="permit-duplicates" type="checkbox"> Permit duplicate target engagements</label></p>
-      <p id="duplicate-warning" class="invalid" role="status"></p>
-      <p id="scenario-warning" class="invalid" role="status"></p>
-      <p id="mission-error" class="invalid" role="alert"></p>
-      <p id="mission-status" role="status"></p>
-      <dl id="mission-summary"></dl>
-      <h3>Selected engagements</h3>
-      <div class="table-scroll"><table>
-        <thead><tr><th>Type</th><th>Shooter(s)</th><th>Target</th><th>Weapon</th><th>Allocation</th><th>Status</th><th>Remove</th></tr></thead>
-        <tbody id="mission-rows"></tbody>
-      </table></div>
-      <h3>Planned expenditure by weapon</h3>
-      <ul id="mission-expenditure"></ul>
-      <h3>Platform inventory after reserve</h3>
-      <div class="table-scroll"><table>
-        <thead><tr><th>Platform</th><th>Weapon</th><th>Loaded</th><th>Reserve</th><th>Available</th><th>Planned</th><th>Remaining</th><th>Deficit</th></tr></thead>
-        <tbody id="mission-inventory"></tbody>
-      </table></div>
-      <h3>Conflicts</h3>
-      <ul id="mission-conflicts"></ul>
-      <h3>Changes from saved candidate snapshots</h3>
-      <ul id="mission-differences"></ul>
-      <p><button id="save-mission" type="button">Save mission JSON</button>
-        <label>Load mission JSON <input id="load-mission" type="file" accept=".json,application/json"></label></p>
-    </section>
     <section id="optimizer" aria-labelledby="optimizer-heading" hidden>
       <h2 id="optimizer-heading">Optimizer proposal</h2>
-      <p>Proposes one inventory-feasible package using the applied engagement filters; it does not change the selected mission or enumerate every possible mission.</p>
-      <p>Primary objective: maximize distinct targets. At most one engagement is assigned per target, even if duplicates are permitted in the selection tray.</p>
+      <p>Proposes one inventory-feasible package using the applied engagement filters, without enumerating every possible mission.</p>
+      <p>Primary objective: maximize distinct targets, with at most one engagement per target.</p>
       <p><label><input id="optimize-expenditure" type="checkbox" checked> Secondary objective: minimize total weapon expenditure</label></p>
       <p><label><input id="optimize-shooters" type="checkbox"> Tie-breaker: minimize distinct shooters</label></p>
       <p>Limits: 5 seconds, 150,000 search nodes, 5,000 candidates, and 60 targets. Time and candidate generation are included in the budget.</p>
@@ -154,6 +72,12 @@
       <p id="optimizer-filters"></p>
       <dl id="optimizer-summary"></dl>
       <h3>Proposed engagements</h3>
+      <label>Sort engagements by <select id="optimizer-sort">
+        <option value="target">Target</option>
+        <option value="shooter">Shooter</option>
+        <option value="weapon">Weapon</option>
+        <option value="required">Weapon quantity</option>
+      </select></label>
       <div class="table-scroll"><table>
         <thead><tr><th>Candidate ID</th><th>Type</th><th>Shooter(s)</th><th>Target</th><th>Weapon</th><th>Allocation</th></tr></thead>
         <tbody id="optimizer-rows"></tbody>
